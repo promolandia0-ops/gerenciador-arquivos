@@ -12,5 +12,10 @@ class MediaFilterTest {
         assertFalse(MediaFilter.isTiny(50_000, 640, 480, false)); assertFalse(MediaFilter.isTiny(5_000, 0, 0, true))
         assertFalse(MediaFilter.keep(it("jpg", tiny = true), false, false)); assertTrue(MediaFilter.keep(it("jpg", tiny = true), false, true)) }
     @Test fun sortBySizeAndDate() { val l = listOf(it("jpg", 1, mod = 5), it("mp4", 3, mod = 1), it("png", 2, mod = 9))
-        assertEquals(listOf(3L, 2L, 1L), MediaFilter.sort(l, 2).map { it.size }); assertEquals(listOf(9L, 5L, 1L), MediaFilter.sort(l, 0).map { it.modified }) }
+        assertEquals(listOf(3L, 2L, 1L), MediaFilter.sort(l, 3).map { it.size }); assertEquals(listOf(9L, 5L, 1L), MediaFilter.sort(l, 1).map { it.modified }) }
+    @Test fun forgottenRanksOldHiddenFirst() { val now = 10L * 3.15576e10.toLong()
+        val fresh = RItem(RCat.CACHE, "/s/DCIM/a.jpg", 1, now - 1000, "jpg"); val old = RItem(RCat.LIXEIRA, "/s/.trash/b.jpg", 1, now - 5L * 3.15576e10.toLong(), "jpg")
+        assertTrue(MediaFilter.forgottenScore(old, now) > MediaFilter.forgottenScore(fresh, now)) }
+    @Test fun blobLike() { assertTrue(MediaFilter.isBlobLike("/x/cache/thumbdata5--1967290299", 100_000)); assertTrue(MediaFilter.isBlobLike("/x/a.db", 100_000))
+        assertFalse(MediaFilter.isBlobLike("/x/a.db", 100)); assertFalse(MediaFilter.isBlobLike("/x/msgstore.db.crypt14", 100_000)); assertFalse(MediaFilter.isBlobLike("/x/song.mp3", 100_000)) }
 }

@@ -71,3 +71,13 @@ class CarverTest {
         val evil = File(tmp.root, "evil.zip"); java.util.zip.ZipOutputStream(evil.outputStream()).use { it.putNextEntry(java.util.zip.ZipEntry("../../fora.txt")); it.write(1); it.closeEntry() }
         assertThrows(Exception::class.java) { Zip.extract(evil, File(tmp.root, "e2")) }; assertFalse(File(tmp.root, "e2").exists()); assertFalse(File(tmp.root.parentFile, "fora.txt").exists()) }
 }
+
+class CarverBrandTest {
+    @Test fun carvesHeicAndMovBrands() {
+        fun box(brand: String): ByteArray { val ftyp = java.nio.ByteBuffer.allocate(16).putInt(16).put("ftyp".toByteArray()).put(brand.toByteArray()).putInt(0).array()
+            val mdat = java.nio.ByteBuffer.allocate(1032).putInt(1032).put("mdat".toByteArray()).array(); return ftyp + mdat }
+        val blob = ByteArray(300) + box("heic") + ByteArray(200) + box("qt  ")
+        val types = Carver.carve(java.nio.ByteBuffer.wrap(blob)).map { it.type }
+        org.junit.Assert.assertTrue(types.toString(), types.containsAll(listOf("heic", "mov")))
+    }
+}

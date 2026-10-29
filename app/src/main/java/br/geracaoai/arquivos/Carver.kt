@@ -99,7 +99,8 @@ object Carver {
             else if (c == 0x89 && u8(b, i + 1) == 0x50 && ascii(b, i + 1, 3) == "PNG") { val e = pngEnd(b, i, lim); if (e > 0) found = Carved(i, e - i, "png") }
             else if (c == 0x47 && ascii(b, i, 4) == "GIF8") { val e = gifEnd(b, i, lim); if (e > 0) found = Carved(i, e - i, "gif") }
             else if (c == 0x52 && ascii(b, i, 4) == "RIFF" && ascii(b, i + 8, 4) == "WEBP") { val e = i + 8 + le32(b, i + 4); if (e <= lim) found = Carved(i, e - i, "webp") }
-            else if (i >= 0 && u8(b, i + 4) == 0x66 && ascii(b, i + 4, 4) == "ftyp") { val e = mp4End(b, i, lim); if (e > 0) found = Carved(i, e - i, "mp4") }
+            else if (i >= 0 && u8(b, i + 4) == 0x66 && ascii(b, i + 4, 4) == "ftyp") { val e = mp4End(b, i, lim); if (e > 0) { val t = when (ascii(b, i + 8, 4)) { "heic", "heix", "mif1", "msf1" -> "heic"; "qt  " -> "mov"; "3gp4", "3gp5", "3gp6", "3g2a" -> "3gp"; "M4A ", "M4B " -> "m4a"; else -> "mp4" }
+                if (t != "m4a") found = Carved(i, e - i, t) } }
             if (found != null && found.length >= minLen) { out += found; i += found.length } else i++
         }
         return if (onlyEmbedded) out.filterNot { it.offset == 0L && it.length == lim } else out

@@ -34,7 +34,8 @@ import kotlinx.coroutines.*
 import java.io.File
 
 enum class RCat(val label: String) { LIXEIRA("Lixeiras"), CACHE("Caches de apps"), MINIATURA("Miniaturas"), EXTRAIDO("Extraídos de blobs"),
-    RENOMEADO("Extensão trocada"), OCULTO("Mídia oculta/.nomedia"), ORFAO("Pastas órfãs"), ANTIGO("Arquivos antigos") }
+    RENOMEADO("Extensão trocada"), OCULTO("Mídia oculta/.nomedia"), ORFAO("Apps desinstalados"), ANTIGO("Arquivos antigos"),
+    PENDENTE("Pendentes/incompletos"), APPDADOS("Pastas de apps"), BACKUP("Backups") }
 
 /** Um achado. Se carved != null, é um trecho dentro de [path]. Se priv, o caminho só é legível via Shizuku/root. */
 data class RItem(val cat: RCat, val path: String, val size: Long, val modified: Long, val type: String?, val carved: Carver.Carved? = null, val priv: Boolean = false, val isDir: Boolean = false, val tiny: Boolean = false) {
@@ -51,7 +52,24 @@ object MediaFilter {
     fun isTiny(size: Long, w: Int, h: Int, video: Boolean) = !video && (size < MIN_BYTES || (w > 0 && h > 0 && maxOf(w, h) < MIN_PX))
     /** Decide se um achado entra na lista. Pastas nunca entram. */
     fun keep(i: RItem, others: Boolean, tiny: Boolean) = !i.isDir && (if (i.isMedia) (tiny || !i.tiny) else others)
-    fun sort(l: List<RItem>, s: Int): List<RItem> = when (s) { 1 -> l.sortedBy { it.modified }; 2 -> l.sortedByDescending { it.size }; 3 -> l.sortedBy { it.size }; else -> l.sortedByDescending { it.modified } }
+    /** Quanto maior, mais "esquecido": antigo, em local escondido, lixeira, app desinstalado, extraído. */
+    fun forgottenScore(i: RItem, now: Long = System.currentTimeMillis()): Double {
+        val years = if (i.modified > 0) ((now - i.modified) / 3.15576e10).coerceIn(0.0, 8.0) else 1.0
+        val cat = when (i.cat) { RCat.LIXEIRA, RCat.ORFAO -> 4.0; RCat.EXTRAIDO, RCat.OCULTO, RCat.RENOMEADO, RCat.PENDENTE, RCat.BACKUP -> 3.0
+            RCat.CACHE, RCat.APPDADOS, RCat.ANTIGO -> 2.0; RCat.MINIATURA -> 1.0 }
+        val hidden = if (i.path.split('/').any { it.startsWith(".") && it.length > 1 }) 2.0 else 0.0
+        return years * 1.5 + cat + hidden + (if (i.priv) 1.0 else 0.0) + (if (i.isVideo) 0.5 else 0.0)
+    }
+    fun sort(l: List<RItem>, s: Int): List<RItem> = when (s) { 1 -> l.sortedByDescending { it.modified }; 2 -> l.sortedBy { it.modified }; 3 -> l.sortedByDescending { it.size }; 4 -> l.sortedBy { it.size }
+        else -> { val now = System.currentTimeMillis(); l.sortedByDescending { forgottenScore(it, now) } } }
+    private val BLOB_EXT = setOf("db", "bak", "dat", "bin", "tmp", "cache", "idx", "0", "1", "2", "journal", "wal", "blob", "data", "pack", "thumb", "thumbs", "cnt", "obj", "img")
+    /** Arquivo com cara de contêiner (SQLite, cache, thumbdata, backup) que pode ter mídias embutidas. */
+    fun isBlobLike(path: String, size: Long): Boolean { if (size !in 4096..(256L shl 20)) return false
+        val n = path.substringAfterLast('/').lowercase(); val e = n.substringAfterLast('.', "")
+        if (e == "crypt" || e.startsWith("crypt1")) return false
+        val lp = path.lowercase()
+        return e in BLOB_EXT || n.startsWith("thumbdata") || n.startsWith("imgcache") || "backup" in n ||
+            (e.isEmpty() && ("/cache/" in lp || "/.thumb" in lp || "smartswitch" in lp || "/files/" in lp)) }
 }
 
 object RecoverScan {
@@ -65,6 +83,9 @@ object RecoverScan {
     private val PUB_CACHE = listOf("Android/media/com.whatsapp/WhatsApp/Media/.Statuses", "Android/media/com.whatsapp/WhatsApp/.Shared", "Android/media/com.whatsapp/WhatsApp/.Thumbs",
         "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images/Sent", "Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video/Sent",
         "Android/media/com.whatsapp.w4b/WhatsApp Business/Media/.Statuses", "Telegram", "Android/media/org.telegram.messenger", "Android/media/com.instagram.android")
+    private val DEEP_ROOT = listOf("com.android.chrome", "com.sec.android.app.sbrowser", "org.mozilla.firefox", "com.whatsapp", "com.whatsapp.w4b", "org.telegram.messenger",
+        "com.instagram.android", "com.facebook.katana", "com.facebook.orca", "com.snapchat.android", "com.zhiliaoapp.musically", "com.ss.android.ugc.trill",
+        "com.google.android.apps.photos", "com.sec.android.gallery3d", "com.google.android.gm", "com.discord", "com.twitter.android", "com.android.providers.media.module", "com.google.android.providers.media.module")
     private val PUB_THUMBS = listOf("DCIM/.thumbnails", "Pictures/.thumbnails", "Movies/.thumbnails", "DCIM/.thumbs")
 
     fun isHiddenPath(f: File) = f.path.removePrefix(root).split('/').any { it.startsWith(".") } || generateSequence(f.parentFile) { it.parentFile }.take(6).any { File(it, ".nomedia").exists() }
@@ -72,7 +93,7 @@ object RecoverScan {
 
     data class Opts(val trash: Boolean = true, val caches: Boolean = true, val thumbs: Boolean = true, val carve: Boolean = true, val magic: Boolean = true,
                     val hidden: Boolean = true, val orphans: Boolean = true, val old: Boolean = true, val oldDays: Int = 365, val includeGallery: Boolean = false,
-                    val others: Boolean = false)
+                    val others: Boolean = false, val mstore: Boolean = true, val deepApps: Boolean = true, val backups: Boolean = true)
 
     suspend fun scan(ctx: Context, o: Opts, phase: (String) -> Unit, found: (RItem) -> Unit) = coroutineScope {
         val seen = HashSet<String>()
@@ -82,7 +103,13 @@ object RecoverScan {
                 if (i.carved != null) Carver.readRange(File(i.path), i.carved).let { android.graphics.BitmapFactory.decodeByteArray(it, 0, it.size, op) } else android.graphics.BitmapFactory.decodeFile(i.path, op)
                 w = op.outWidth; h = op.outHeight }
             return i.copy(tiny = MediaFilter.isTiny(i.size, w, h, false)) }
+        val hashes = HashSet<String>()
+        fun fp(i: RItem): String? = if (i.priv) null else runCatching { java.io.RandomAccessFile(i.path, "r").use { r ->
+            val off = i.carved?.offset ?: 0L; val len = i.carved?.length ?: r.length(); val n = minOf(len, 65536L).toInt(); val b = ByteArray(n); r.seek(off); r.readFully(b)
+            if (n == 0) return@use null
+            val md = java.security.MessageDigest.getInstance("MD5").digest(b); "$len:" + md.joinToString("") { "%02x".format(it) } } }.getOrNull()
         fun add(i0: RItem) { if (i0.isDir) return; if (!i0.isMedia && !o.others) return; if (!seen.add(i0.key)) return
+            if (i0.isMedia) fp(i0)?.let { if (!hashes.add(it)) return }
             found(dims(i0)) }
         val tmp = File(ctx.externalCacheDir, "scan_tmp").apply { deleteRecursively(); mkdirs() }
         val priv = Priv.ok()
@@ -91,14 +118,14 @@ object RecoverScan {
         fun carveInto(f: File, cat: RCat, displayPath: String = f.path, isPriv: Boolean = false) {
             if (!o.carve) return
             runCatching { Carver.carveFile(f).filterNot { it.offset == 0L && it.length == f.length() }.forEach { c ->
-                add(RItem(RCat.EXTRAIDO, f.path, c.length, f.lastModified(), c.type, c, false).copy(path = f.path)) } }
+                add(RItem(if (cat == RCat.BACKUP) RCat.BACKUP else RCat.EXTRAIDO, f.path, c.length, f.lastModified(), c.type, c, false)) } }
         }
         fun handlePublic(f: File, cat: RCat) {
             val t = Carver.sniff(f)
             if (t != null) add(RItem(cat, f.path, f.length(), f.lastModified(), t)) else if (f.length() in 2048..(512L shl 20)) carveInto(f, cat)
         }
+        var budget = 1500L shl 20
         fun handlePriv(dir: String, cat: RCat) {
-            var budget = 800L shl 20
             Priv.findFiles(dir, 1024).forEach { pf -> ensureActive()
                 val t = runCatching { Carver.sniff(Priv.hexToBytes(pf.head)) }.getOrNull()
                 if (t != null) add(RItem(cat, pf.path, pf.size, pf.modified, t, priv = true))
@@ -115,14 +142,30 @@ object RecoverScan {
                 .forEach { ensureActive(); add(RItem(RCat.LIXEIRA, it.path, it.length(), it.lastModified(), Carver.sniff(it) ?: it.ext)) }
             if (priv) PRIV_TRASH.forEach { handlePriv("$root/Android/data/$it", RCat.LIXEIRA) }
         }
+        if (o.mstore) { phase("MediaStore: itens na lixeira, pendentes e incompletos…")
+            runCatching { val b = Bundle().apply { putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_INCLUDE); putInt(MediaStore.QUERY_ARG_MATCH_PENDING, MediaStore.MATCH_INCLUDE)
+                    putString(ContentResolver.QUERY_ARG_SQL_SELECTION, "${MediaStore.MediaColumns.IS_TRASHED}=1 OR ${MediaStore.MediaColumns.IS_PENDING}=1") }
+                ctx.contentResolver.query(MediaStore.Files.getContentUri("external"), arrayOf(MediaStore.MediaColumns.DATA, MediaStore.MediaColumns.SIZE, MediaStore.MediaColumns.DATE_MODIFIED, MediaStore.MediaColumns.IS_TRASHED), b, null)?.use { c ->
+                    while (c.moveToNext()) { ensureActive(); val p = c.getString(0) ?: continue; val f = File(p); if (f.exists() && f.length() > 0) { val t = Carver.sniff(f) ?: f.ext
+                        add(RItem(if (c.getInt(3) == 1) RCat.LIXEIRA else RCat.PENDENTE, p, f.length(), (c.getLong(2) * 1000).takeIf { it > 0 } ?: f.lastModified(), t)) } } } }
+            // Arquivos ".pending-…" deixados por gravações/downloads interrompidos
+            publicFiles(primaryRoot).filter { it.name.startsWith(".pending-") }.forEach { ensureActive(); add(RItem(RCat.PENDENTE, it.path, it.length(), it.lastModified(), Carver.sniff(it) ?: it.ext)) }
+        }
         if (o.caches) { phase("Caches de WhatsApp, Telegram, Instagram, galeria…")
             PUB_CACHE.map { File(primaryRoot, it) }.filter { it.isDirectory }.forEach { d -> publicFiles(d).forEach { ensureActive(); if (it.ext in MEDIA) add(RItem(RCat.CACHE, it.path, it.length(), it.lastModified(), it.ext)) else handlePublic(it, RCat.CACHE) } }
             if (priv) PRIV_CACHE.forEach { phase("Cache (via ${Priv.name()}): ${it.substringBefore('/')}"); handlePriv("$root/Android/data/$it", RCat.CACHE) }
         }
+        if (o.deepApps && priv) {
+            // Varredura recursiva de TODAS as pastas de apps (Android/data, obb, media) via Shizuku/root
+            listOf("data", "obb").forEach { s -> Priv.listDirs("$root/Android/$s").filter { it != ctx.packageName }.forEach { n -> ensureActive(); phase("Apps (${Priv.name()}): Android/$s/$n")
+                handlePriv("$root/Android/$s/$n", if ("cache" in n) RCat.CACHE else RCat.APPDADOS) } }
+            // Só com root: caches internos (/data/data) de navegadores e mensageiros
+            if (Prefs.root && Root.available()) DEEP_ROOT.forEach { pk -> ensureActive(); phase("Root: /data/data/$pk"); handlePriv("/data/data/$pk/cache", RCat.CACHE); handlePriv("/data/data/$pk/files", RCat.APPDADOS); handlePriv("/data/data/$pk/app_webview", RCat.CACHE) }
+        }
         if (o.thumbs) { phase("Miniaturas e thumbdata…")
             PUB_THUMBS.map { File(primaryRoot, it) }.filter { it.isDirectory }.forEach { d -> publicFiles(d).forEach { ensureActive(); handlePublic(it, RCat.MINIATURA) } }
         }
-        if (o.magic || o.hidden || o.old) { phase("Varredura completa (assinaturas, ocultos, antigos)…")
+        if (o.magic || o.hidden || o.old) { phase("Varredura profunda de todo o armazenamento e cartão SD…")
             val lim = System.currentTimeMillis() - o.oldDays * 86400000L
             volumes(ctx).forEach { v -> publicFiles(v.root).forEach { f -> ensureActive()
                 val hidden = isHiddenPath(f)
@@ -130,6 +173,7 @@ object RecoverScan {
                     Carver.sniff(f)?.takeIf { it != "pdf" && it != "mp3" && it != "ogg" && it != "m4a" }?.let { add(RItem(RCat.RENOMEADO, f.path, f.length(), f.lastModified(), it)) } }
                 if (o.hidden && hidden) { if (f.ext in MEDIA) add(RItem(RCat.OCULTO, f.path, f.length(), f.lastModified(), f.ext))
                     else if (f.length() >= 4096) Carver.sniff(f)?.let { t -> add(RItem(RCat.OCULTO, f.path, f.length(), f.lastModified(), t)) } }
+                if (o.carve && f.ext !in MEDIA && MediaFilter.isBlobLike(f.path, f.length())) carveInto(f, if (f.path.lowercase().let { "backup" in it || "smartswitch" in it || it.endsWith(".bak") }) RCat.BACKUP else RCat.EXTRAIDO)
                 if (o.old && f.lastModified() < lim && f.length() >= 100 * 1024 && (o.includeGallery || !isGalleryMedia(f))) add(RItem(RCat.ANTIGO, f.path, f.length(), f.lastModified(), f.ext))
             } }
         }
@@ -201,6 +245,7 @@ fun MediaFinderScreen(title: String, intro: String, initial: RecoverScan.Opts, f
             if (items.isEmpty() && phase == null) {
                 Column(Modifier.fillMaxSize().verticalScrollCompat(), horizontalAlignment = Alignment.CenterHorizontally) {
                     EmptyState(Icons.Default.PhotoLibrary, title, intro)
+                    if (fullOpts) Text(ROOT_NOTE, Modifier.padding(horizontal = 24.dp, vertical = 6.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (fullOpts && !Priv.ok()) Text("Dica: ative o Shizuku (Ferramentas > Android/data) para buscar também dentro de Android/data.", Modifier.padding(horizontal = 24.dp), color = MaterialTheme.colorScheme.tertiary)
                     Button({ start() }, Modifier.padding(16.dp).fillMaxWidth(0.8f).height(56.dp)) { Icon(Icons.Default.Search, null); Spacer(Modifier.width(8.dp)); Text("Buscar fotos e vídeos") }
                     if (done != null) Text(done!!, color = MaterialTheme.colorScheme.secondary)
@@ -213,7 +258,7 @@ fun MediaFinderScreen(title: String, intro: String, initial: RecoverScan.Opts, f
                 item { FilterChip(type == 0, { type = 0 }, { Text("Tudo") }) }
                 if (opts.others) item { FilterChip(type == 3, { type = 3 }, { Text("Outros") }) }
                 item { VerticalDivider(Modifier.height(32.dp).padding(horizontal = 4.dp)) }
-                items(listOf("Recentes", "Antigos", "Maiores", "Menores").withIndex().toList()) { (i, s) -> FilterChip(sort == i, { sort = i }, { Text(s) }) } }
+                items(listOf("Esquecidos", "Recentes", "Antigos", "Maiores", "Menores").withIndex().toList()) { (i, s) -> FilterChip(sort == i, { sort = i }, { Text(s) }) } }
             Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("${shown.size} itens · ${fmtSize(shown.sumOf { it.size })}", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
                 TextButton({ sel.clear(); sel.addAll(shown.map { it.key }) }) { Text("Selecionar todos") }
@@ -233,6 +278,7 @@ fun MediaFinderScreen(title: String, intro: String, initial: RecoverScan.Opts, f
             sw("Lixeiras", opts.trash) { opts = opts.copy(trash = it) }; sw("Caches de apps", opts.caches) { opts = opts.copy(caches = it) }
             sw("Miniaturas", opts.thumbs) { opts = opts.copy(thumbs = it) }; sw("Extrair de blobs (carving)", opts.carve) { opts = opts.copy(carve = it) }
             sw("Extensão trocada", opts.magic) { opts = opts.copy(magic = it) }; sw("Mídia oculta/.nomedia", opts.hidden) { opts = opts.copy(hidden = it) }
+            sw("MediaStore (lixeira/pendentes)", opts.mstore) { opts = opts.copy(mstore = it) }; sw("Todas as pastas de apps (Shizuku/root)", opts.deepApps) { opts = opts.copy(deepApps = it) }
             sw("Apps desinstalados", opts.orphans) { opts = opts.copy(orphans = it) }; sw("Arquivos antigos (> 1 ano)", opts.old) { opts = opts.copy(old = it) }
             sw("Incluir mídia normal da galeria", opts.includeGallery) { opts = opts.copy(includeGallery = it) }
             sw("Modo root (se o aparelho tiver root)", Prefs.root) { Prefs.root = it; Prefs.save(ctx) } }
@@ -305,3 +351,5 @@ fun RecoverScreen(back: () -> Unit) = MediaFinderScreen("Busca intensa / Recuper
 fun HiddenMediaScreen(back: () -> Unit) = MediaFinderScreen("Fotos e vídeos ocultos",
     "Encontra fotos e vídeos escondidos (pastas com ponto, .nomedia, .thumbnails, status do WhatsApp) em todo o armazenamento. Só leitura.",
     RecoverScan.Opts(trash = false, caches = false, thumbs = false, carve = false, magic = false, hidden = true, orphans = false, old = false), false, back)
+
+const val ROOT_NOTE = "Sinceridade: sem root, nenhum app (nem UltData, DiskDigger ou EaseUS) lê o espaço apagado da memória interna — o Android criptografa e limpa (TRIM) o que é excluído. O que dá para achar, e este app procura: lixeiras, caches e miniaturas de apps e galeria, mídias ocultas, arquivos com extensão trocada, mídias embutidas em bancos/caches/backups, apps desinstalados e itens pendentes. Com Shizuku ele entra em Android/data e obb de todos os apps; com root, também nos caches internos de navegadores e mensageiros."
