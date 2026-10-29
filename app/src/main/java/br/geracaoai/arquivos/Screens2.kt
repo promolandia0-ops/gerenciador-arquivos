@@ -42,6 +42,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 // ---------------- DUPLICADOS ----------------
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun DupScreen() {
     val ctx = LocalContext.current; val scope = rememberCoroutineScope()
@@ -53,19 +54,20 @@ fun DupScreen() {
     fun scan() { sel.clear(); groups = null; phase = "Listando arquivos…"; prog = 0f; scope.launch {
         groups = withContext(Dispatchers.IO) {
             val minSize = if (type == 2) 100 * 1024L else 1L
-            val files = volumes(ctx).flatMap { v -> walk(v.root, true) { f -> !f.path.contains("/.LixeiraGerenciador") && f.length() >= minSize && when (type) { 0 -> f.ext in VIDEO; 1 -> f.ext in IMAGE; else -> true } } }
+            val files = if (type == 3) emptyList() else volumes(ctx).flatMap { v -> walk(v.root, true) { f -> !f.path.contains("/.LixeiraGerenciador") && f.length() >= minSize && when (type) { 0 -> f.ext in VIDEO; 1 -> f.ext in IMAGE; else -> true } } }
             phase = "Comparando ${files.size} arquivos (tamanho → hash parcial → hash completo)…"
-            DupCore.findDuplicates(files) { d, t -> prog = if (t == 0) 1f else d.toFloat() / t }
+            if (type == 3) { phase = "Calculando hash perceptual das imagens…"; Similar.find(ctx) { d, t -> prog = d.toFloat() / t } }
+            else DupCore.findDuplicates(files) { d, t -> prog = if (t == 0) 1f else d.toFloat() / t }
         }; phase = null } }
     val total = remember(sel.size) { sel.sumOf { it.length() } }
-    Scaffold(topBar = { Bar("Duplicados", groups?.let { g -> "${g.size} grupos · ${fmtSize(g.sumOf { it[0].length() * (it.size - 1) })} recuperáveis" }, null) },
+    Scaffold(contentWindowInsets = WindowInsets(0, 0, 0, 0), topBar = { Bar("Duplicados", groups?.let { g -> "${g.size} grupos · ${fmtSize(g.sumOf { it[0].length() * (it.size - 1) })} recuperáveis" }, null) },
         bottomBar = { AnimatedVisibility(sel.isNotEmpty(), enter = slideInVertically { it }, exit = slideOutVertically { it }) {
             Button({ ask = true }, Modifier.fillMaxWidth().padding(12.dp).height(56.dp), colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) {
                 Icon(Icons.Default.Delete, null); Spacer(Modifier.width(8.dp)); Text("Mover ${sel.size} para lixeira · libera ${fmtSize(total)}") } } }) { pad ->
         Column(Modifier.padding(pad)) {
-            Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("Vídeos", "Imagens", "Todos").forEachIndexed { i, s -> FilterChip(type == i, { type = i }, { Text(s) }, enabled = phase == null) }
-                Spacer(Modifier.weight(1f)); FilledTonalButton({ scan() }, enabled = phase == null) { Text(if (groups == null) "Escanear" else "Reescanear") }
+            androidx.compose.foundation.layout.FlowRow(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("Vídeos", "Imagens", "Todos", "Parecidas").forEachIndexed { i, s -> FilterChip(type == i, { type = i }, { Text(s) }, enabled = phase == null) }
+                FilledTonalButton({ scan() }, enabled = phase == null) { Text(if (groups == null) "Escanear" else "Reescanear") }
             }
             val g = groups
             if (g != null && g.isNotEmpty()) Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -82,7 +84,7 @@ fun DupScreen() {
                 else -> LazyColumn(contentPadding = PaddingValues(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     items(g, key = { it[0].path }) { grp ->
                         ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) { Column(Modifier.padding(12.dp)) {
-                            Text("${grp.size} cópias · ${fmtSize(grp[0].length())} cada", style = MaterialTheme.typography.titleSmall)
+                            Text(if (type == 3) "${grp.size} imagens parecidas" else "${grp.size} cópias · ${fmtSize(grp[0].length())} cada", style = MaterialTheme.typography.titleSmall)
                             grp.forEach { f -> Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { toggle(sel, f) }.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Checkbox(f in sel, { toggle(sel, f) })
                                 Box(Modifier.clickable { openWith(ctx, f) }) { Thumb(f, 64) }; Spacer(Modifier.width(10.dp))
@@ -228,7 +230,7 @@ fun DataBrowser(mode: String, close: () -> Unit) {
         else Saf.list(ctx, tree!!, cur).map { DEntry(it.name, it.isDir, it.size, it.modified, it.id, it) } } }
     BackHandlerCompat(true) { if (stack.size > 1) stack.removeAt(stack.lastIndex) else close() }
     val exportDir = File(primaryRoot, "Download/Exportado do Android-data")
-    Scaffold(topBar = { Bar(cur.substringAfterLast('/').substringAfterLast(':'), (if (isShz) "Shizuku · " else "SAF · ") + cur, { if (stack.size > 1) stack.removeAt(stack.lastIndex) else close() }) {
+    Scaffold(contentWindowInsets = WindowInsets(0, 0, 0, 0), topBar = { Bar(cur.substringAfterLast('/').substringAfterLast(':'), (if (isShz) "Shizuku · " else "SAF · ") + cur, { if (stack.size > 1) stack.removeAt(stack.lastIndex) else close() }) {
         if (isShz && Clip.files.isNotEmpty()) IconButton({ scope.launch { val n = withContext(Dispatchers.IO) { Clip.files.count { Shz.copyIn(it.path, cur) } }; toast(ctx, "$n copiado(s) para cá"); Clip.files.clear(); refresh++ } }) { Icon(Icons.Default.ContentPaste, "Colar") } } }) { pad ->
         Box(Modifier.padding(pad)) { val l = list
             when { l == null -> LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -263,7 +265,7 @@ fun VaultScreen(act: FragmentActivity, back: () -> Unit) {
     if (!unlocked) { PinLock(act, { unlocked = true }, back); return }
     var items by remember { mutableStateOf<List<Vault.Item>?>(null) }; var refresh by remember { mutableIntStateOf(0) }; var del by remember { mutableStateOf<Vault.Item?>(null) }
     LaunchedEffect(refresh) { items = withContext(Dispatchers.IO) { Vault.list(ctx) } }
-    Scaffold(topBar = { Bar("Cofre", items?.let { "${it.size} arquivos · ${fmtSize(it.sumOf { i -> i.size })} · AES-256" }, back) { IconButton({ unlocked = false }) { Icon(Icons.Default.Lock, "Trancar") } } }) { pad ->
+    Scaffold(contentWindowInsets = WindowInsets(0, 0, 0, 0), topBar = { Bar("Cofre", items?.let { "${it.size} arquivos · ${fmtSize(it.sumOf { i -> i.size })} · AES-256" }, back) { IconButton({ unlocked = false }) { Icon(Icons.Default.Lock, "Trancar") } } }) { pad ->
         Box(Modifier.padding(pad)) { val l = items
             when { l == null -> LinearProgressIndicator(Modifier.fillMaxWidth())
                 l.isEmpty() -> EmptyState(Icons.Default.Shield, "Cofre vazio", "No navegador, segure um arquivo > ⋮ > \"Mover para o cofre\".")

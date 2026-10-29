@@ -8,7 +8,7 @@
   <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
   <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions"/>
   <application android:name=".App" android:label="Gerenciador de Arquivos" android:icon="@mipmap/ic_launcher"
-      android:theme="@style/AppTheme" android:requestLegacyExternalStorage="true" android:supportsRtl="true">
+      android:theme="@style/AppTheme" android:requestLegacyExternalStorage="true" android:supportsRtl="true" android:enableOnBackInvokedCallback="true">
     <activity android:name=".MainActivity" android:exported="true" android:windowSoftInputMode="adjustResize">
       <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
     </activity>

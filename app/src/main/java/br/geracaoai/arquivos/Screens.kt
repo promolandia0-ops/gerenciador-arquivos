@@ -48,7 +48,7 @@ fun HomeScreen(go: (Scr) -> Unit) {
         items(vols) { v -> val (used, total) = remember(v) { stat(v.root) }
             Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(Brush.linearGradient(listOf(Color(0xFF1E3A66), Color(0xFF2B1E4F))))
                 .clickable { go(Scr.Browse(v.root.path)) }.padding(20.dp)) {
-                Column { Row(verticalAlignment = Alignment.CenterVertically) { Icon(if (v.root == primaryRoot) Icons.Default.PhoneAndroid else Icons.Default.SdCard, null, tint = Color.White)
+                Column { Row(verticalAlignment = Alignment.CenterVertically) { Icon(if (v.root == primaryRoot) Icons.Default.PhoneAndroid else Icons.Default.SdCard, null, Modifier.shared("dir:" + v.root.path), tint = Color.White)
                     Spacer(Modifier.width(10.dp)); Text(v.name, style = MaterialTheme.typography.titleMedium, color = Color.White) }
                     Spacer(Modifier.height(14.dp))
                     LinearProgressIndicator({ if (total > 0) used.toFloat() / total else 0f }, Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp)), color = Color(0xFF8AB4F8), trackColor = Color(0x33FFFFFF))
@@ -61,6 +61,7 @@ fun HomeScreen(go: (Scr) -> Unit) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) { cats.chunked(3).forEach { row -> Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 row.forEach { (c, ic, col) -> CatTile(c.label, ic, col, Modifier.weight(1f)) { go(Scr.Category(c)) } } } } } }
         item { Text("Atalhos", style = MaterialTheme.typography.titleMedium) }
+        item { ToolTile(Icons.Default.ManageSearch, "Busca intensa / Recuperar", "Ache fotos e vídeos em lixeiras, caches e miniaturas") { go(Scr.Recover) } }
         item { ToolTile(Icons.Default.History, "Recentes", "Modificados nos últimos 7 dias") { go(Scr.Recent) } }
         item { ToolTile(Icons.Default.VideoLibrary, "Vídeos duplicados", "Libere espaço apagando cópias") { go(Scr.Dups) } }
         item { ToolTile(Icons.Default.VisibilityOff, "Ocultos", "Arquivos e pastas escondidos") { go(Scr.Hidden) } }
@@ -89,6 +90,8 @@ fun BrowserScreen(dir: String, onNavigate: (String) -> Unit, go: (Scr) -> Unit, 
     var query by remember { mutableStateOf("") }; var searching by remember { mutableStateOf(false) }
     val sel = remember(dir) { mutableStateListOf<File>() }
     var sortMenu by remember { mutableStateOf(false) }; var newFolder by remember { mutableStateOf(false) }; var pasting by remember { mutableStateOf(false) }
+    var zipAsk by remember { mutableStateOf<File?>(null) }
+    fun openF(f: File) { if (f.ext == "zip") zipAsk = f else openWith(ctx, f) }
     val restricted = d.path.endsWith("/Android/data") || d.path.endsWith("/Android/obb")
     LaunchedEffect(dir, refresh, Prefs.showHidden, Prefs.sort, query) {
         files = withContext(Dispatchers.IO) {
@@ -98,10 +101,10 @@ fun BrowserScreen(dir: String, onNavigate: (String) -> Unit, go: (Scr) -> Unit, 
     }
     BackHandlerCompat(sel.isNotEmpty()) { sel.clear() }
     BackHandlerCompat(sel.isEmpty() && d.parentFile != null && volumes(ctx).none { it.root == d }) { onNavigate(d.parent!!) }
-    Scaffold(topBar = {
-        if (searching) TopAppBar(title = { OutlinedTextField(query, { query = it }, placeholder = { Text("Buscar em ${d.name}") }, singleLine = true, modifier = Modifier.fillMaxWidth()) },
+    Scaffold(contentWindowInsets = WindowInsets(0, 0, 0, 0), topBar = {
+        if (searching) TopAppBar(windowInsets = WindowInsets(0, 0, 0, 0), title = { OutlinedTextField(query, { query = it }, placeholder = { Text("Buscar em ${d.name}") }, singleLine = true, modifier = Modifier.fillMaxWidth()) },
             navigationIcon = { IconButton({ searching = false; query = "" }) { Icon(Icons.Default.Close, null) } })
-        else Bar(if (volumes(ctx).any { it.root == d }) "Armazenamento" else d.name, d.path, back) {
+        else Bar(if (volumes(ctx).any { it.root == d }) "Armazenamento" else d.name, d.path, back, sharedKey = "dir:" + d.path) {
             IconButton({ searching = true }) { Icon(Icons.Default.Search, "Buscar") }
             IconButton({ Prefs.grid = !Prefs.grid; Prefs.save(ctx) }) { Icon(if (Prefs.grid) Icons.Default.ViewList else Icons.Default.GridView, "Visualização") }
             Box { IconButton({ sortMenu = true }) { Icon(Icons.Default.MoreVert, null) }
@@ -125,12 +128,16 @@ fun BrowserScreen(dir: String, onNavigate: (String) -> Unit, go: (Scr) -> Unit, 
                     Button({ go(Scr.Data) }) { Text("Abrir com acesso especial") } }
                 l.isEmpty() -> EmptyState(Icons.Default.FolderOpen, if (query.isNotEmpty()) "Nada encontrado" else "Pasta vazia")
                 Prefs.grid -> LazyVerticalGrid(GridCells.Adaptive(108.dp), Modifier.fillMaxSize(), contentPadding = PaddingValues(8.dp)) {
-                    items(l, key = { it.path }) { f -> FileCell(f, f in sel, { if (sel.isNotEmpty()) toggle(sel, f) else if (f.isDirectory) onNavigate(f.path) else openWith(ctx, f) }) { toggle(sel, f) } } }
+                    items(l, key = { it.path }) { f -> FileCell(f, f in sel, { if (sel.isNotEmpty()) toggle(sel, f) else if (f.isDirectory) onNavigate(f.path) else openF(f) }) { toggle(sel, f) } } }
                 else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(8.dp)) {
-                    items(l, key = { it.path }) { f -> FileRow(f, f in sel, if (query.isNotEmpty()) f.parent else null, { if (sel.isNotEmpty()) toggle(sel, f) else if (f.isDirectory) onNavigate(f.path) else openWith(ctx, f) }) { toggle(sel, f) } } }
+                    items(l, key = { it.path }) { f -> FileRow(f, f in sel, if (query.isNotEmpty()) f.parent else null, { if (sel.isNotEmpty()) toggle(sel, f) else if (f.isDirectory) onNavigate(f.path) else openF(f) }) { toggle(sel, f) } } }
             }
         }
     }
+    zipAsk?.let { z -> AlertDialog({ zipAsk = null }, confirmButton = { TextButton({ zipAsk = null; scope.launch {
+        val r = withContext(Dispatchers.IO) { runCatching { val t = FileOps.uniqueTarget(d, z.nameWithoutExtension); Zip.extract(z, t); t } }
+        toast(ctx, r.map { "Extraído em ${it.name}" }.getOrElse { "Falha ao extrair: ${it.message}" }); refresh++ } }) { Text("Extrair aqui") } },
+        dismissButton = { TextButton({ zipAsk = null; openWith(ctx, z, true) }) { Text("Abrir com…") } }, title = { Text(z.name) }, text = { Text(fmtSize(z.length())) }) }
     if (newFolder) InputDialog("Nova pasta", "Nova pasta", { newFolder = false }) { n -> if (!File(d, n).mkdirs()) toast(ctx, "Não foi possível criar"); refresh++ }
     if (pasting) Confirm(if (Clip.cut) "Mover aqui?" else "Copiar aqui?", "${Clip.files.size} item(ns) para ${d.path}. Cada arquivo é verificado (SHA-256) antes de apagar a origem.",
         onDismiss = { pasting = false }) {
@@ -143,7 +150,8 @@ fun BrowserScreen(dir: String, onNavigate: (String) -> Unit, go: (Scr) -> Unit, 
 fun toggle(sel: MutableList<File>, f: File) { if (f in sel) sel.remove(f) else sel.add(f) }
 
 @Composable
-fun BackHandlerCompat(enabled: Boolean, onBack: () -> Unit) = androidx.activity.compose.BackHandler(enabled, onBack)
+fun BackHandlerCompat(enabled: Boolean, onBack: () -> Unit) = androidx.activity.compose.PredictiveBackHandler(enabled) { flow ->
+    try { flow.collect { Nav.progress = it.progress }; Nav.progress = 0f; onBack() } catch (e: kotlin.coroutines.cancellation.CancellationException) { Nav.progress = 0f; throw e } }
 
 @Composable
 fun FileListScreen(title: String, loader: suspend () -> List<File>, go: (Scr) -> Unit, back: () -> Unit) {
@@ -152,7 +160,7 @@ fun FileListScreen(title: String, loader: suspend () -> List<File>, go: (Scr) ->
     val sel = remember { mutableStateListOf<File>() }
     LaunchedEffect(refresh) { files = withContext(Dispatchers.IO) { loader() } }
     BackHandlerCompat(sel.isNotEmpty()) { sel.clear() }
-    Scaffold(topBar = { Bar(title, files?.let { "${it.size} itens · ${fmtSize(it.sumOf { f -> f.length() })}" } ?: "Carregando…", back) },
+    Scaffold(contentWindowInsets = WindowInsets(0, 0, 0, 0), topBar = { Bar(title, files?.let { "${it.size} itens · ${fmtSize(it.sumOf { f -> f.length() })}" } ?: "Carregando…", back) },
         bottomBar = { AnimatedVisibility(sel.isNotEmpty()) { SelectionActions(sel, { refresh++ }) } }) { pad ->
         Box(Modifier.padding(pad)) { val l = files
             when { l == null -> LinearProgressIndicator(Modifier.fillMaxWidth()); l.isEmpty() -> EmptyState(Icons.Default.Inbox, "Nada por aqui")
@@ -171,7 +179,7 @@ fun HiddenScreen(go: (Scr) -> Unit, back: () -> Unit) {
             if (f != v.root && (f.name.startsWith(".") && f.parentFile?.name?.startsWith(".") != true) && !f.path.contains("/.LixeiraGerenciador")) out += f } }
         out.sortedWith(compareBy({ !it.isDirectory }, { it.path })) }; scanning = false } }
     LaunchedEffect(refresh) { if (refresh > 0) scan() }
-    Scaffold(topBar = { Bar("Ocultos", res?.let { "${it.count { f -> f.isDirectory }} pastas · ${it.count { f -> f.isFile }} arquivos" }, back) {
+    Scaffold(contentWindowInsets = WindowInsets(0, 0, 0, 0), topBar = { Bar("Ocultos", res?.let { "${it.count { f -> f.isDirectory }} pastas · ${it.count { f -> f.isFile }} arquivos" }, back) {
         IconButton({ scan() }) { Icon(Icons.Default.Refresh, "Escanear") } } },
         bottomBar = { AnimatedVisibility(sel.isNotEmpty()) { SelectionActions(sel, { refresh++ }) } }) { pad ->
         Box(Modifier.padding(pad)) { val l = res
@@ -193,7 +201,7 @@ fun TrashScreen(back: () -> Unit) {
     var items by remember { mutableStateOf<List<Trash.Item>?>(null) }; var refresh by remember { mutableIntStateOf(0) }
     var ask by remember { mutableStateOf<Trash.Item?>(null) }; var empty by remember { mutableStateOf(false) }
     LaunchedEffect(refresh) { items = withContext(Dispatchers.IO) { Trash.list(ctx) } }
-    Scaffold(topBar = { Bar("Lixeira", items?.let { "${it.size} itens · ${fmtSize(it.sumOf { i -> if (i.data.isFile) i.data.length() else i.data.walkTopDown().sumOf { f -> f.length() } })}" }, back) {
+    Scaffold(contentWindowInsets = WindowInsets(0, 0, 0, 0), topBar = { Bar("Lixeira", items?.let { "${it.size} itens · ${fmtSize(it.sumOf { i -> if (i.data.isFile) i.data.length() else i.data.walkTopDown().sumOf { f -> f.length() } })}" }, back) {
         if (!items.isNullOrEmpty()) TextButton({ empty = true }) { Text("Esvaziar") } } }) { pad ->
         Box(Modifier.padding(pad)) { val l = items
             when { l == null -> LinearProgressIndicator(Modifier.fillMaxWidth()); l.isEmpty() -> EmptyState(Icons.Default.DeleteOutline, "Lixeira vazia", "Itens apagados aparecem aqui e podem ser restaurados.")

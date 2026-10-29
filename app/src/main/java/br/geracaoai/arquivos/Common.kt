@@ -34,10 +34,11 @@ object Clip { val files = mutableStateListOf<File>(); var cut by mutableStateOf(
 
 object Prefs {
     var showHidden by mutableStateOf(false); var grid by mutableStateOf(false); var sort by mutableIntStateOf(0)
+    var theme by mutableIntStateOf(0); var root by mutableStateOf(false)
     private var loaded = false
     fun load(c: Context) { if (loaded) return; loaded = true; val p = c.getSharedPreferences("prefs", 0)
-        showHidden = p.getBoolean("h", false); grid = p.getBoolean("g", false); sort = p.getInt("s", 0) }
-    fun save(c: Context) = c.getSharedPreferences("prefs", 0).edit().putBoolean("h", showHidden).putBoolean("g", grid).putInt("s", sort).apply()
+        showHidden = p.getBoolean("h", false); grid = p.getBoolean("g", false); sort = p.getInt("s", 0); theme = p.getInt("t", 0); root = p.getBoolean("r", false) }
+    fun save(c: Context) = c.getSharedPreferences("prefs", 0).edit().putBoolean("h", showHidden).putBoolean("g", grid).putInt("s", sort).putInt("t", theme).putBoolean("r", root).apply()
 }
 val SORTS = listOf("Nome (A-Z)", "Nome (Z-A)", "Mais recentes", "Mais antigos", "Maiores", "Menores", "Tipo")
 fun sortFiles(l: List<File>, s: Int): List<File> {
@@ -79,7 +80,7 @@ fun FileRow(f: File, selected: Boolean, info: String? = null, onClick: () -> Uni
     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(bg)
         .combinedClickable(onClick = onClick, onLongClick = { hap.performHapticFeedback(HapticFeedbackType.LongPress); onLong() })
         .padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Box { Thumb(f); if (selected) Icon(Icons.Default.CheckCircle, null, Modifier.align(Alignment.BottomEnd).size(18.dp), tint = MaterialTheme.colorScheme.primary) }
+        Box(if (f.isDirectory) Modifier.shared("dir:" + f.path) else Modifier) { Thumb(f); if (selected) Icon(Icons.Default.CheckCircle, null, Modifier.align(Alignment.BottomEnd).size(18.dp), tint = MaterialTheme.colorScheme.primary) }
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(title ?: f.name, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge)
@@ -97,7 +98,7 @@ fun FileCell(f: File, selected: Boolean, onClick: () -> Unit, onLong: () -> Unit
         .background(if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant)
         .combinedClickable(onClick = onClick, onLongClick = { hap.performHapticFeedback(HapticFeedbackType.LongPress); onLong() }).padding(8.dp),
         horizontalAlignment = Alignment.CenterHorizontally) {
-        Thumb(f, 84); Spacer(Modifier.height(6.dp))
+        Box(if (f.isDirectory) Modifier.shared("dir:" + f.path) else Modifier) { Thumb(f, 84) }; Spacer(Modifier.height(6.dp))
         Text(f.name, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
     }
 }
@@ -117,8 +118,9 @@ fun EmptyState(icon: ImageVector, title: String, sub: String = "") {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun Bar(title: String, sub: String? = null, back: (() -> Unit)?, actions: @Composable RowScope.() -> Unit = {}) {
-    TopAppBar(title = { Column { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis); if (sub != null) Text(sub, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant) } },
+fun Bar(title: String, sub: String? = null, back: (() -> Unit)?, sharedKey: String? = null, actions: @Composable RowScope.() -> Unit = {}) {
+    TopAppBar(windowInsets = WindowInsets(0, 0, 0, 0), title = { Row(verticalAlignment = Alignment.CenterVertically) { if (sharedKey != null) { Icon(Icons.Default.Folder, null, Modifier.shared(sharedKey).padding(end = 10.dp).size(28.dp), tint = Color(0xFF8AB4F8)) }
+ Column { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis); if (sub != null) Text(sub, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant) } } },
         navigationIcon = { if (back != null) IconButton(back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Voltar") } }, actions = actions,
         colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background))
 }
@@ -141,7 +143,7 @@ fun InputDialog(title: String, initial: String, onDismiss: () -> Unit, onOk: (St
 fun SelectionActions(sel: SnapshotStateList<File>, refresh: () -> Unit, extraRename: Boolean = true) {
     val ctx = LocalContext.current; val scope = rememberCoroutineScope()
     var ask by remember { mutableStateOf<String?>(null) }; var rename by remember { mutableStateOf(false) }; var menu by remember { mutableStateOf(false) }
-    var busy by remember { mutableStateOf<String?>(null) }
+    var busy by remember { mutableStateOf<String?>(null) }; var zip by remember { mutableStateOf(false) }
     fun run(label: String, op: (File) -> Unit) { val l = sel.toList(); busy = label; scope.launch {
         var ok = 0; var fail = 0
         withContext(Dispatchers.IO) { l.forEach { runCatching { op(it) }.onSuccess { ok++ }.onFailure { fail++ } } }
@@ -157,6 +159,7 @@ fun SelectionActions(sel: SnapshotStateList<File>, refresh: () -> Unit, extraRen
                 DropdownMenu(menu, { menu = false }) {
                     if (sel.size == 1 && extraRename) DropdownMenuItem({ Text("Renomear") }, { menu = false; rename = true }, leadingIcon = { Icon(Icons.Default.Edit, null) })
                     if (sel.size == 1 && sel[0].isFile) DropdownMenuItem({ Text("Abrir com…") }, { menu = false; openWith(ctx, sel[0], true) }, leadingIcon = { Icon(Icons.AutoMirrored.Filled.OpenInNew, null) })
+                    DropdownMenuItem({ Text("Compactar (ZIP)") }, { menu = false; zip = true }, leadingIcon = { Icon(Icons.Default.FolderZip, null) })
                     DropdownMenuItem({ Text("Mover para o cofre") }, { menu = false; ask = "vault" }, leadingIcon = { Icon(Icons.Default.Lock, null) })
                     DropdownMenuItem({ Text("Excluir permanentemente") }, { menu = false; ask = "perm" }, leadingIcon = { Icon(Icons.Default.DeleteForever, null) })
                     DropdownMenuItem({ Text("Selecionar nenhum") }, { menu = false; sel.clear() }, leadingIcon = { Icon(Icons.Default.Close, null) })
@@ -176,6 +179,9 @@ fun SelectionActions(sel: SnapshotStateList<File>, refresh: () -> Unit, extraRen
         val f = sel[0]; val t = File(f.parentFile, n)
         if (t.exists()) toast(ctx, "Já existe um item com esse nome") else if (!f.renameTo(t)) toast(ctx, "Não foi possível renomear")
         sel.clear(); refresh() }
+    if (zip && sel.isNotEmpty()) InputDialog("Nome do ZIP", (if (sel.size == 1) sel[0].nameWithoutExtension else "Arquivos") + ".zip", { zip = false }) { n ->
+        val l = sel.toList(); val dst = FileOps.uniqueTarget(l[0].parentFile!!, if (n.endsWith(".zip")) n else "$n.zip"); busy = "Compactando"
+        scope.launch { val r = withContext(Dispatchers.IO) { runCatching { Zip.compress(l, dst) } }; busy = null; sel.clear(); refresh(); toast(ctx, if (r.isSuccess) "Criado ${dst.name}" else "Falha ao compactar") } }
     busy?.let { AlertDialog({}, confirmButton = {}, title = { Text(it) }, text = { LinearProgressIndicator(Modifier.fillMaxWidth()) }) }
 }
 typealias SnapshotStateList<T> = androidx.compose.runtime.snapshots.SnapshotStateList<T>

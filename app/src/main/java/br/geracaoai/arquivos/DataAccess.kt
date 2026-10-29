@@ -76,3 +76,28 @@ object Shz {
 }
 
 fun sdkInt() = Build.VERSION.SDK_INT
+
+object Root {
+    fun available() = listOf("/system/bin/su", "/system/xbin/su", "/sbin/su", "/su/bin/su", "/debug_ramdisk/su").any { java.io.File(it).exists() }
+    fun exec(cmd: String): Pair<Int, String> = runCatching {
+        val p = ProcessBuilder("su", "-c", cmd).redirectErrorStream(true).start(); val o = p.inputStream.bufferedReader().readText(); p.waitFor() to o
+    }.getOrElse { -1 to (it.message ?: "") }
+}
+
+/** Shell privilegiado: Shizuku (shell) ou root (opcional). */
+object Priv {
+    fun ok() = Shz.granted() || (Prefs.root && Root.available())
+    fun name() = if (Shz.granted()) "Shizuku" else if (Prefs.root && Root.available()) "Root" else "nenhum"
+    fun exec(cmd: String) = if (Shz.granted()) Shz.exec(cmd) else if (Prefs.root) Root.exec(cmd) else (-1 to "")
+    data class PF(val path: String, val size: Long, val modified: Long, val head: String)
+    /** Lista arquivos (recursivo) com tamanho, data e cabeçalho hex de 16 bytes. Somente leitura. */
+    fun findFiles(dir: String, minSize: Long = 0): List<PF> {
+        val q = Shz.q(dir)
+        val (_, out) = exec("[ -d $q ] && find $q -type f -size +${minSize / 1024}k 2>/dev/null | while IFS= read -r f; do s=\$(stat -c '%s|%Y' \"\$f\"); h=\$(head -c 16 \"\$f\" | od -An -tx1 | tr -d ' \\n'); echo \"\$s|\$h|\$f\"; done")
+        return out.lines().mapNotNull { l -> val p = l.split("|", limit = 4); if (p.size < 4) null else PF(p[3], p[0].toLongOrNull() ?: 0, (p[1].toLongOrNull() ?: 0) * 1000, p[2]) }
+    }
+    fun listDirs(dir: String): List<String> = exec("ls -1 ${Shz.q(dir)} 2>/dev/null").second.lines().filter { it.isNotBlank() }
+    fun du(path: String): Long = exec("du -sk ${Shz.q(path)} 2>/dev/null").second.trim().substringBefore('\t').substringBefore(' ').toLongOrNull()?.times(1024) ?: 0
+    fun copy(src: String, dst: String) = exec("cp -p ${Shz.q(src)} ${Shz.q(dst)}").first == 0
+    fun hexToBytes(h: String) = ByteArray(h.length / 2) { h.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
+}
