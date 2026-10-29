@@ -8,6 +8,12 @@ import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.lazy.grid.*
+import androidx.compose.material.icons.automirrored.filled.*
+import androidx.compose.ui.graphics.Color
+import coil.request.ImageRequest
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -31,10 +37,21 @@ enum class RCat(val label: String) { LIXEIRA("Lixeiras"), CACHE("Caches de apps"
     RENOMEADO("Extensão trocada"), OCULTO("Mídia oculta/.nomedia"), ORFAO("Pastas órfãs"), ANTIGO("Arquivos antigos") }
 
 /** Um achado. Se carved != null, é um trecho dentro de [path]. Se priv, o caminho só é legível via Shizuku/root. */
-data class RItem(val cat: RCat, val path: String, val size: Long, val modified: Long, val type: String?, val carved: Carver.Carved? = null, val priv: Boolean = false, val isDir: Boolean = false) {
+data class RItem(val cat: RCat, val path: String, val size: Long, val modified: Long, val type: String?, val carved: Carver.Carved? = null, val priv: Boolean = false, val isDir: Boolean = false, val tiny: Boolean = false) {
     val key get() = path + "#" + (carved?.offset ?: -1)
     val name get() = path.substringAfterLast('/') + (carved?.let { " @${it.offset}" } ?: "")
-    val isMedia get() = type in IMAGE || type in VIDEO || type in setOf("heic", "gif", "webp")
+    val isMedia get() = MediaFilter.isMediaType(type)
+    val isVideo get() = type in VIDEO
+}
+
+/** Regras puras (testáveis) do foco em fotos/vídeos. */
+object MediaFilter {
+    const val MIN_BYTES = 10 * 1024L; const val MIN_PX = 100
+    fun isMediaType(t: String?) = t != null && (t in IMAGE || t in VIDEO || t in setOf("heic", "gif", "webp"))
+    fun isTiny(size: Long, w: Int, h: Int, video: Boolean) = !video && (size < MIN_BYTES || (w > 0 && h > 0 && maxOf(w, h) < MIN_PX))
+    /** Decide se um achado entra na lista. Pastas nunca entram. */
+    fun keep(i: RItem, others: Boolean, tiny: Boolean) = !i.isDir && (if (i.isMedia) (tiny || !i.tiny) else others)
+    fun sort(l: List<RItem>, s: Int): List<RItem> = when (s) { 1 -> l.sortedBy { it.modified }; 2 -> l.sortedByDescending { it.size }; 3 -> l.sortedBy { it.size }; else -> l.sortedByDescending { it.modified } }
 }
 
 object RecoverScan {
@@ -54,11 +71,19 @@ object RecoverScan {
     fun isGalleryMedia(f: File) = f.ext in MEDIA && !isHiddenPath(f) && !f.name.startsWith(".trashed")
 
     data class Opts(val trash: Boolean = true, val caches: Boolean = true, val thumbs: Boolean = true, val carve: Boolean = true, val magic: Boolean = true,
-                    val hidden: Boolean = true, val orphans: Boolean = true, val old: Boolean = true, val oldDays: Int = 365, val includeGallery: Boolean = false)
+                    val hidden: Boolean = true, val orphans: Boolean = true, val old: Boolean = true, val oldDays: Int = 365, val includeGallery: Boolean = false,
+                    val others: Boolean = false)
 
     suspend fun scan(ctx: Context, o: Opts, phase: (String) -> Unit, found: (RItem) -> Unit) = coroutineScope {
         val seen = HashSet<String>()
-        fun add(i: RItem) { if (seen.add(i.key)) found(i) }
+        fun dims(i: RItem): RItem { if (i.isVideo || !i.isMedia) return i
+            var w = 0; var h = 0
+            if (i.size < 300 * 1024 && !i.priv) runCatching { val op = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                if (i.carved != null) Carver.readRange(File(i.path), i.carved).let { android.graphics.BitmapFactory.decodeByteArray(it, 0, it.size, op) } else android.graphics.BitmapFactory.decodeFile(i.path, op)
+                w = op.outWidth; h = op.outHeight }
+            return i.copy(tiny = MediaFilter.isTiny(i.size, w, h, false)) }
+        fun add(i0: RItem) { if (i0.isDir) return; if (!i0.isMedia && !o.others) return; if (!seen.add(i0.key)) return
+            found(dims(i0)) }
         val tmp = File(ctx.externalCacheDir, "scan_tmp").apply { deleteRecursively(); mkdirs() }
         val priv = Priv.ok()
         val excl = listOf("$root/.LixeiraGerenciador", "$root/Recuperados", "$root/Android/data", "$root/Android/obb")
@@ -103,17 +128,22 @@ object RecoverScan {
                 val hidden = isHiddenPath(f)
                 if (o.magic && f.ext !in MEDIA && f.length() >= 4096 && f.ext !in setOf("apk", "zip", "pdf", "mp3", "m4a", "ogg", "opus", "jar", "db", "json", "txt")) {
                     Carver.sniff(f)?.takeIf { it != "pdf" && it != "mp3" && it != "ogg" && it != "m4a" }?.let { add(RItem(RCat.RENOMEADO, f.path, f.length(), f.lastModified(), it)) } }
-                if (o.hidden && hidden && f.ext in MEDIA) add(RItem(RCat.OCULTO, f.path, f.length(), f.lastModified(), f.ext))
+                if (o.hidden && hidden) { if (f.ext in MEDIA) add(RItem(RCat.OCULTO, f.path, f.length(), f.lastModified(), f.ext))
+                    else if (f.length() >= 4096) Carver.sniff(f)?.let { t -> add(RItem(RCat.OCULTO, f.path, f.length(), f.lastModified(), t)) } }
                 if (o.old && f.lastModified() < lim && f.length() >= 100 * 1024 && (o.includeGallery || !isGalleryMedia(f))) add(RItem(RCat.ANTIGO, f.path, f.length(), f.lastModified(), f.ext))
             } }
         }
         if (o.orphans) { phase("Pastas de apps desinstalados…")
             val pm = ctx.packageManager; val installed = pm.getInstalledApplications(0).map { it.packageName }.toSet()
             fun isPkg(n: String) = n.count { it == '.' } >= 1 && n !in installed && n.matches(Regex("[A-Za-z][\\w]*(\\.[\\w]+)+"))
+            // Nunca lista a pasta em si: achata e mostra os arquivos de mídia de dentro.
             File(primaryRoot, "Android/media").listFiles().orEmpty().filter { it.isDirectory && isPkg(it.name) }.forEach { d ->
-                add(RItem(RCat.ORFAO, d.path, d.walkTopDown().sumOf { it.length() }, d.lastModified(), null, isDir = true)) }
+                d.walkTopDown().filter { it.isFile }.forEach { f -> ensureActive(); val t = if (f.ext in MEDIA) f.ext else Carver.sniff(f) ?: f.ext
+                    add(RItem(RCat.ORFAO, f.path, f.length(), f.lastModified(), t)) } }
             if (priv) listOf("data", "obb").forEach { s -> Priv.listDirs("$root/Android/$s").filter { isPkg(it) }.forEach { n ->
-                val p = "$root/Android/$s/$n"; add(RItem(RCat.ORFAO, p, Priv.du(p), 0, null, priv = true, isDir = true)) } }
+                Priv.findFiles("$root/Android/$s/$n", 1).forEach { pf -> ensureActive()
+                    val t = runCatching { Carver.sniff(Priv.hexToBytes(pf.head)) }.getOrNull() ?: pf.path.substringAfterLast('.', "").lowercase().ifEmpty { null }
+                    add(RItem(RCat.ORFAO, pf.path, pf.size, pf.modified, t, priv = true)) } } }
         }
         phase("Concluído")
     }
@@ -133,79 +163,145 @@ object RecoverScan {
     }
 }
 
+
+/** Arquivo local legível para visualizar (cópia em cache para itens privados/extraídos). Nunca altera a origem. */
+suspend fun previewFile(ctx: Context, i: RItem): File? = withContext(Dispatchers.IO) { runCatching {
+    when {
+        i.carved == null && !i.priv -> File(i.path)
+        else -> { val d = File(ctx.externalCacheDir, "preview").apply { mkdirs() }
+            val f = File(d, i.key.hashCode().toUInt().toString() + "." + (i.type ?: "bin"))
+            if (!f.exists() || f.length() == 0L) { if (i.carved != null) Carver.extract(File(i.path), i.carved, f) else if (!Priv.copy(i.path, f.path)) error("x") }
+            f }
+    } }.getOrNull() }
+
+fun fmtDur(ms: Long): String { val s = ms / 1000; return if (s >= 3600) "%d:%02d:%02d".format(s / 3600, s / 60 % 60, s % 60) else "%d:%02d".format(s / 60, s % 60) }
+
 @Composable
-fun RecoverScreen(back: () -> Unit) {
+fun MediaFinderScreen(title: String, intro: String, initial: RecoverScan.Opts, fullOpts: Boolean, back: () -> Unit) {
     val ctx = LocalContext.current; val scope = rememberCoroutineScope()
-    var opts by remember { mutableStateOf(RecoverScan.Opts()) }
+    var opts by remember { mutableStateOf(initial) }; var tiny by remember { mutableStateOf(false) }
     val items = remember { mutableStateListOf<RItem>() }; var phase by remember { mutableStateOf<String?>(null) }; var job by remember { mutableStateOf<Job?>(null) }
-    var cat by remember { mutableStateOf<RCat?>(null) }; var type by remember { mutableIntStateOf(0) }; var minMb by remember { mutableIntStateOf(0) }; var age by remember { mutableIntStateOf(0) }
+    var type by remember { mutableIntStateOf(0) }; var sort by remember { mutableIntStateOf(0) }
     val sel = remember { mutableStateListOf<String>() }; var ask by remember { mutableStateOf(false) }; var done by remember { mutableStateOf<String?>(null) }; var optsOpen by remember { mutableStateOf(false) }
+    var view by remember { mutableStateOf<RItem?>(null) }
     fun start() { items.clear(); sel.clear(); done = null; job = scope.launch(Dispatchers.IO) {
         try { RecoverScan.scan(ctx, opts, { phase = it }) { i -> scope.launch(Dispatchers.Main) { items.add(i) } } } catch (_: CancellationException) {} finally { phase = null } } }
-    val ageLim = when (age) { 1 -> 30L; 2 -> 180L; 3 -> 365L; else -> 0L } * 86400000L
-    val shown = items.filter { (cat == null || it.cat == cat) && (type == 0 || (type == 1 && (it.type in IMAGE || it.type in setOf("gif", "webp", "heic"))) || (type == 2 && it.type in VIDEO) || (type == 3 && !it.isMedia))
-        && it.size >= minMb * 1048576L && (ageLim == 0L || (it.modified in 1..(System.currentTimeMillis() - ageLim))) }
-    Scaffold(contentWindowInsets = WindowInsets(0, 0, 0, 0), topBar = { Bar("Busca intensa / Recuperar", phase ?: "${items.size} achados · acesso privilegiado: ${Priv.name()}", back) {
+    fun recover(list: List<RItem>) = scope.launch { var ok = 0; var fail = 0; withContext(Dispatchers.IO) { list.forEach { runCatching { RecoverScan.recover(ctx, it) }.onSuccess { ok++ }.onFailure { fail++ } } }
+        sel.clear(); done = "✓ $ok recuperado(s) em /Recuperados" + if (fail > 0) " · $fail falharam" else ""; toast(ctx, done!!) }
+    val base = items.filter { MediaFilter.keep(it, opts.others, tiny) }
+    val shown = remember(base.size, type, sort, items.size) { MediaFilter.sort(base.filter { when (type) { 1 -> it.isMedia && !it.isVideo; 2 -> it.isVideo; 3 -> !it.isMedia; else -> true } }, sort) }
+    Scaffold(contentWindowInsets = WindowInsets(0, 0, 0, 0), topBar = { Bar(title, phase ?: "${base.count { it.isMedia && !it.isVideo }} fotos · ${base.count { it.isVideo }} vídeos" + (if (fullOpts) " · acesso: ${Priv.name()}" else ""), back) {
         if (phase != null) TextButton({ job?.cancel() }) { Text("Cancelar") } else IconButton({ optsOpen = true }) { Icon(Icons.Default.Tune, "Opções") } } },
         bottomBar = { AnimatedVisibility(sel.isNotEmpty(), enter = slideInVertically { it }, exit = slideOutVertically { it }) {
-            Button({ ask = true }, Modifier.fillMaxWidth().padding(12.dp).height(56.dp)) { Icon(Icons.Default.SettingsBackupRestore, null); Spacer(Modifier.width(8.dp)); Text("Recuperar ${sel.size} para /Recuperados") } } }) { pad ->
+            Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedButton({ sel.clear() }, Modifier.height(56.dp)) { Text("Limpar") }; Spacer(Modifier.width(8.dp))
+                Button({ ask = true }, Modifier.weight(1f).height(56.dp)) { Icon(Icons.Default.SettingsBackupRestore, null); Spacer(Modifier.width(8.dp)); Text("Recuperar ${sel.size}") } } } }) { pad ->
         Column(Modifier.padding(pad)) {
             if (phase != null) LinearProgressIndicator(Modifier.fillMaxWidth())
             if (items.isEmpty() && phase == null) {
                 Column(Modifier.fillMaxSize().verticalScrollCompat(), horizontalAlignment = Alignment.CenterHorizontally) {
-                    EmptyState(Icons.Default.ManageSearch, "Busca intensa", "Procura em lixeiras, caches de apps (WhatsApp, Telegram, galeria Samsung), miniaturas e blobs, arquivos com extensão trocada, mídias ocultas, pastas de apps desinstalados e arquivos antigos. Só lê — nada é alterado. Mídia normal da galeria fica de fora.")
-                    if (!Priv.ok()) Text("Dica: ative o Shizuku (Ferramentas > Android/data) para buscar também dentro de Android/data.", Modifier.padding(horizontal = 24.dp), color = MaterialTheme.colorScheme.tertiary)
-                    Button({ start() }, Modifier.padding(16.dp).fillMaxWidth(0.8f).height(56.dp)) { Icon(Icons.Default.Search, null); Spacer(Modifier.width(8.dp)); Text("Iniciar busca intensa") }
+                    EmptyState(Icons.Default.PhotoLibrary, title, intro)
+                    if (fullOpts && !Priv.ok()) Text("Dica: ative o Shizuku (Ferramentas > Android/data) para buscar também dentro de Android/data.", Modifier.padding(horizontal = 24.dp), color = MaterialTheme.colorScheme.tertiary)
+                    Button({ start() }, Modifier.padding(16.dp).fillMaxWidth(0.8f).height(56.dp)) { Icon(Icons.Default.Search, null); Spacer(Modifier.width(8.dp)); Text("Buscar fotos e vídeos") }
                     if (done != null) Text(done!!, color = MaterialTheme.colorScheme.secondary)
                 }
                 return@Column
             }
             LazyRow(contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                item { FilterChip(cat == null, { cat = null }, { Text("Tudo ${items.size}") }) }
-                items(RCat.entries.filter { c -> items.any { it.cat == c } }) { c -> FilterChip(cat == c, { cat = c }, { Text("${c.label} ${items.count { it.cat == c }}") }) } }
-            LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                item { listOf("Todos", "Fotos", "Vídeos", "Outros").forEachIndexed { i, s -> FilterChip(type == i, { type = i }, { Text(s) }, Modifier.padding(end = 6.dp)) } }
-                item { listOf(0, 1, 10, 100).forEach { m -> FilterChip(minMb == m, { minMb = m }, { Text(if (m == 0) "Qualquer tamanho" else "≥ $m MB") }, Modifier.padding(end = 6.dp)) } }
-                item { listOf("Qualquer data", "> 30 dias", "> 6 meses", "> 1 ano").forEachIndexed { i, s -> FilterChip(age == i, { age = i }, { Text(s) }, Modifier.padding(end = 6.dp)) } } }
+                item { FilterChip(type == 1, { type = 1 }, { Text("Fotos") }, leadingIcon = { Icon(Icons.Default.Image, null, Modifier.size(18.dp)) }) }
+                item { FilterChip(type == 2, { type = 2 }, { Text("Vídeos") }, leadingIcon = { Icon(Icons.Default.Movie, null, Modifier.size(18.dp)) }) }
+                item { FilterChip(type == 0, { type = 0 }, { Text("Tudo") }) }
+                if (opts.others) item { FilterChip(type == 3, { type = 3 }, { Text("Outros") }) }
+                item { VerticalDivider(Modifier.height(32.dp).padding(horizontal = 4.dp)) }
+                items(listOf("Recentes", "Antigos", "Maiores", "Menores").withIndex().toList()) { (i, s) -> FilterChip(sort == i, { sort = i }, { Text(s) }) } }
             Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("${shown.size} itens · ${fmtSize(shown.sumOf { it.size })}", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
                 TextButton({ sel.clear(); sel.addAll(shown.map { it.key }) }) { Text("Selecionar todos") }
                 if (phase == null) TextButton({ start() }) { Text("Nova busca") } }
             done?.let { Text(it, Modifier.padding(horizontal = 12.dp), color = MaterialTheme.colorScheme.secondary) }
-            LazyColumn(contentPadding = PaddingValues(8.dp)) { items(shown, key = { it.key }) { i ->
-                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).clickable { if (i.key in sel) sel.remove(i.key) else sel.add(i.key) }.padding(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(i.key in sel, { if (i.key in sel) sel.remove(i.key) else sel.add(i.key) })
-                    RPreview(i); Spacer(Modifier.width(10.dp))
-                    Column(Modifier.weight(1f)) { Text(i.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text("${i.cat.label} · ${i.type ?: "pasta"} · ${fmtSize(i.size)}" + (if (i.modified > 0) " · " + fmtDate(i.modified) else "") + (if (i.priv) " · ${Priv.name()}" else ""), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
-                        Text(i.path.removePrefix(primaryRoot.path), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis) }
-                } } }
+            LazyVerticalGrid(GridCells.Adaptive(108.dp), contentPadding = PaddingValues(6.dp)) { items(shown, key = { it.key }) { i ->
+                MediaCell(i, i.key in sel, onClick = { if (sel.isNotEmpty()) { if (i.key in sel) sel.remove(i.key) else sel.add(i.key) } else view = i }) { if (i.key in sel) sel.remove(i.key) else sel.add(i.key) } } }
         }
     }
-    if (ask) Confirm("Recuperar ${sel.size} item(ns)?", "Serão COPIADOS para /Recuperados/<categoria>. Os originais não são alterados.", "Recuperar", onDismiss = { ask = false }) {
-        val list = items.filter { it.key in sel }
-        scope.launch { var ok = 0; var fail = 0; withContext(Dispatchers.IO) { list.forEach { runCatching { RecoverScan.recover(ctx, it) }.onSuccess { ok++ }.onFailure { fail++ } } }
-            sel.clear(); done = "✓ $ok recuperado(s) em /Recuperados" + if (fail > 0) " · $fail falharam" else "" } }
-    if (optsOpen) AlertDialog({ optsOpen = false }, confirmButton = { TextButton({ optsOpen = false }) { Text("OK") } }, title = { Text("Onde procurar") }, text = { Column(Modifier.verticalScrollCompat()) {
+    if (ask) Confirm("Recuperar ${sel.size} item(ns)?", "Serão COPIADOS para /Recuperados/<categoria>. Os originais não são alterados.", "Recuperar", onDismiss = { ask = false }) { recover(items.filter { it.key in sel }) }
+    view?.let { v -> MediaViewer(v, { view = null }) { recover(listOf(v)); view = null } }
+    if (optsOpen) AlertDialog({ optsOpen = false }, confirmButton = { TextButton({ optsOpen = false }) { Text("OK") } }, title = { Text("Opções") }, text = { Column(Modifier.verticalScrollCompat()) {
         @Composable fun sw(l: String, v: Boolean, f: (Boolean) -> Unit) = Row(verticalAlignment = Alignment.CenterVertically) { Text(l, Modifier.weight(1f)); Switch(v, f) }
-        sw("Lixeiras", opts.trash) { opts = opts.copy(trash = it) }; sw("Caches de apps", opts.caches) { opts = opts.copy(caches = it) }
-        sw("Miniaturas", opts.thumbs) { opts = opts.copy(thumbs = it) }; sw("Extrair de blobs (carving)", opts.carve) { opts = opts.copy(carve = it) }
-        sw("Extensão trocada", opts.magic) { opts = opts.copy(magic = it) }; sw("Mídia oculta/.nomedia", opts.hidden) { opts = opts.copy(hidden = it) }
-        sw("Pastas órfãs", opts.orphans) { opts = opts.copy(orphans = it) }; sw("Arquivos antigos (> 1 ano)", opts.old) { opts = opts.copy(old = it) }
-        sw("Incluir mídia normal da galeria", opts.includeGallery) { opts = opts.copy(includeGallery = it) }
-        sw("Modo root (se o aparelho tiver root)", Prefs.root) { Prefs.root = it; Prefs.save(ctx) }
+        sw("Mostrar imagens minúsculas (< 10 KB / ícones)", tiny) { tiny = it }
+        sw("Incluir outros arquivos (não mídia) — requer nova busca", opts.others) { opts = opts.copy(others = it) }
+        if (fullOpts) { HorizontalDivider(Modifier.padding(vertical = 6.dp)); Text("Onde procurar", style = MaterialTheme.typography.titleSmall)
+            sw("Lixeiras", opts.trash) { opts = opts.copy(trash = it) }; sw("Caches de apps", opts.caches) { opts = opts.copy(caches = it) }
+            sw("Miniaturas", opts.thumbs) { opts = opts.copy(thumbs = it) }; sw("Extrair de blobs (carving)", opts.carve) { opts = opts.copy(carve = it) }
+            sw("Extensão trocada", opts.magic) { opts = opts.copy(magic = it) }; sw("Mídia oculta/.nomedia", opts.hidden) { opts = opts.copy(hidden = it) }
+            sw("Apps desinstalados", opts.orphans) { opts = opts.copy(orphans = it) }; sw("Arquivos antigos (> 1 ano)", opts.old) { opts = opts.copy(old = it) }
+            sw("Incluir mídia normal da galeria", opts.includeGallery) { opts = opts.copy(includeGallery = it) }
+            sw("Modo root (se o aparelho tiver root)", Prefs.root) { Prefs.root = it; Prefs.save(ctx) } }
     } })
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun RPreview(i: RItem) {
+fun MediaCell(i: RItem, selected: Boolean, onClick: () -> Unit, onLong: () -> Unit) {
     val ctx = LocalContext.current
-    val model by produceState<Any?>(null, i.key) { value = withContext(Dispatchers.IO) { when {
-        i.carved != null && i.carved.length < (8 shl 20) && i.type != "mp4" -> runCatching { Carver.readRange(File(i.path), i.carved) }.getOrNull()
-        !i.priv && !i.isDir && i.isMedia -> File(i.path)
-        else -> null } } }
-    Box(Modifier.size(56.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
-        Icon(if (i.isDir) Icons.Default.FolderDelete else if (i.type in VIDEO) Icons.Default.Movie else Icons.Default.Image, null, tint = MaterialTheme.colorScheme.primary)
-        if (model != null) AsyncImage(model, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+    val model by produceState<Any?>(null, i.key) { value = when {
+        !i.isMedia -> null
+        i.carved != null && !i.isVideo && i.carved.length < (8 shl 20) -> withContext(Dispatchers.IO) { runCatching { Carver.readRange(File(i.path), i.carved) }.getOrNull() }
+        !i.priv && i.carved == null -> File(i.path)
+        i.size < (60L shl 20) -> previewFile(ctx, i)
+        else -> null } }
+    val dur by produceState(0L, i.key) { if (i.isVideo && !i.priv && i.carved == null) value = withContext(Dispatchers.IO) { runCatching {
+        android.media.MediaMetadataRetriever().run { try { setDataSource(i.path); extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLong() ?: 0L } finally { release() } } }.getOrDefault(0L) } }
+    Column(Modifier.padding(3.dp).clip(RoundedCornerShape(12.dp)).combinedClickable(onClick = onClick, onLongClick = onLong)) {
+        Box(Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
+            Icon(if (i.isVideo) Icons.Default.Movie else if (i.isMedia) Icons.Default.Image else Icons.AutoMirrored.Filled.InsertDriveFile, null, tint = MaterialTheme.colorScheme.primary)
+            if (model != null) AsyncImage(ImageRequest.Builder(ctx).data(model).size(256).memoryCacheKey(i.key).build(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            if (i.isVideo) Row(Modifier.align(Alignment.BottomEnd).padding(4.dp).clip(RoundedCornerShape(6.dp)).background(Color.Black.copy(alpha = 0.6f)).padding(horizontal = 4.dp, vertical = 1.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.PlayArrow, null, Modifier.size(12.dp), tint = Color.White); Text(if (dur > 0) fmtDur(dur) else "vídeo", color = Color.White, style = MaterialTheme.typography.labelSmall) }
+            if (selected) { Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)))
+                Icon(Icons.Default.CheckCircle, null, Modifier.align(Alignment.TopEnd).padding(4.dp).size(22.dp), tint = MaterialTheme.colorScheme.primary) }
+        }
+        Text(i.cat.label + (if (i.priv) " · ${Priv.name()}" else ""), Modifier.padding(horizontal = 2.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
+
+@Composable
+fun MediaViewer(i: RItem, close: () -> Unit, onRecover: () -> Unit) {
+    val ctx = LocalContext.current
+    val file by produceState<File?>(null, i.key) { value = previewFile(ctx, i) }
+    var failed by remember { mutableStateOf(false) }
+    LaunchedEffect(i.key) { kotlinx.coroutines.delay(15000); if (file == null) failed = true }
+    androidx.compose.ui.window.Dialog(close, androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) {
+        Box(Modifier.fillMaxSize().background(Color.Black)) {
+            val f = file
+            when {
+                f == null -> if (failed) Text("Não foi possível abrir a prévia", Modifier.align(Alignment.Center), color = Color.White) else CircularProgressIndicator(Modifier.align(Alignment.Center))
+                i.isVideo -> androidx.compose.ui.viewinterop.AndroidView({ c -> android.widget.VideoView(c).apply {
+                    setMediaController(android.widget.MediaController(c).also { it.setAnchorView(this) }); setVideoPath(f.path); setOnPreparedListener { start() }
+                    setOnErrorListener { _, _, _ -> toast(c, "Não deu para tocar aqui — use Abrir com"); true } } }, Modifier.align(Alignment.Center).fillMaxWidth(),
+                    onRelease = { it.stopPlayback() })
+                i.isMedia -> AsyncImage(f, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+                else -> Icon(Icons.AutoMirrored.Filled.InsertDriveFile, null, Modifier.align(Alignment.Center).size(96.dp), tint = Color.White)
+            }
+            Column(Modifier.align(Alignment.TopStart).fillMaxWidth().background(Color.Black.copy(alpha = 0.5f)).padding(8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(close) { Icon(Icons.Default.Close, "Fechar", tint = Color.White) }
+                    Column(Modifier.weight(1f)) { Text(i.name, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("${i.cat.label} · ${fmtSize(i.size)}" + (if (i.modified > 0) " · " + fmtDate(i.modified) else ""), color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelSmall)
+                        Text(i.path.removePrefix(primaryRoot.path), color = Color.White.copy(alpha = 0.6f), style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                    if (f != null) IconButton({ openWith(ctx, f, true) }) { Icon(Icons.AutoMirrored.Filled.OpenInNew, "Abrir com", tint = Color.White) }
+                    IconButton(onRecover) { Icon(Icons.Default.SettingsBackupRestore, "Recuperar", tint = Color.White) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun RecoverScreen(back: () -> Unit) = MediaFinderScreen("Busca intensa / Recuperar",
+    "Mostra só FOTOS e VÍDEOS encontrados em lixeiras, caches de apps (WhatsApp, Telegram, galeria Samsung), miniaturas, blobs, extensão trocada, pastas ocultas/.nomedia, apps desinstalados e arquivos antigos. Só lê — nada é alterado.",
+    RecoverScan.Opts(), true, back)
+
+@Composable
+fun HiddenMediaScreen(back: () -> Unit) = MediaFinderScreen("Fotos e vídeos ocultos",
+    "Encontra fotos e vídeos escondidos (pastas com ponto, .nomedia, .thumbnails, status do WhatsApp) em todo o armazenamento. Só leitura.",
+    RecoverScan.Opts(trash = false, caches = false, thumbs = false, carve = false, magic = false, hidden = true, orphans = false, old = false), false, back)

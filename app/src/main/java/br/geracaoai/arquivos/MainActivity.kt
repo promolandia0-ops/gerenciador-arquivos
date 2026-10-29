@@ -113,7 +113,7 @@ fun Root(act: FragmentActivity) {
                 Scr.Recent -> FileListScreen("Recentes", { loadRecent(ctx) }, ::go) { stack.removeAt(stack.lastIndex) }
                 Scr.Dups -> DupScreen()
                 Scr.Apps -> AppsScreen()
-                Scr.Hidden -> HiddenScreen(::go) { stack.removeAt(stack.lastIndex) }
+                Scr.Hidden -> HiddenMediaScreen { stack.removeAt(stack.lastIndex) }
                 Scr.Data -> DataScreen { stack.removeAt(stack.lastIndex) }
                 Scr.Vault -> VaultScreen(act) { stack.removeAt(stack.lastIndex) }
                 Scr.Trash -> TrashScreen { stack.removeAt(stack.lastIndex) }
@@ -145,7 +145,7 @@ fun ToolsScreen(go: (Scr) -> Unit) {
         Text("Ferramentas", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(bottom = 8.dp))
         ToolTile(Icons.Default.ManageSearch, "Busca intensa / Recuperar", "Lixeiras, caches, miniaturas, blobs, extensão trocada, órfãos") { go(Scr.Recover) }
         ToolTile(Icons.Default.CleaningServices, "Limpeza", "Cache, temporários, APKs instalados, pastas vazias (vai para a lixeira)") { go(Scr.Junk) }
-        ToolTile(Icons.Default.VisibilityOff, "Arquivos e pastas ocultos", "Escaneia todo o armazenamento atrás de itens ocultos e .nomedia") { go(Scr.Hidden) }
+        ToolTile(Icons.Default.VisibilityOff, "Fotos e vídeos ocultos", "Mídias escondidas em pastas com ponto e .nomedia") { go(Scr.Hidden) }
         ToolTile(Icons.Default.Android, "Android/data e obb", "Acesso via SAF ou Shizuku (Android 11 a 15)") { go(Scr.Data) }
         ToolTile(Icons.Default.Lock, "Cofre", "Esconda arquivos com criptografia AES-256 e PIN/biometria") { go(Scr.Vault) }
         ToolTile(Icons.Default.Delete, "Lixeira", "Restaure ou apague definitivamente") { go(Scr.Trash) }

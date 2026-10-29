@@ -64,7 +64,7 @@ fun HomeScreen(go: (Scr) -> Unit) {
         item { ToolTile(Icons.Default.ManageSearch, "Busca intensa / Recuperar", "Ache fotos e vídeos em lixeiras, caches e miniaturas") { go(Scr.Recover) } }
         item { ToolTile(Icons.Default.History, "Recentes", "Modificados nos últimos 7 dias") { go(Scr.Recent) } }
         item { ToolTile(Icons.Default.VideoLibrary, "Vídeos duplicados", "Libere espaço apagando cópias") { go(Scr.Dups) } }
-        item { ToolTile(Icons.Default.VisibilityOff, "Ocultos", "Arquivos e pastas escondidos") { go(Scr.Hidden) } }
+        item { ToolTile(Icons.Default.VisibilityOff, "Ocultos", "Fotos e vídeos escondidos") { go(Scr.Hidden) } }
         item { ToolTile(Icons.Default.Android, "Android/data e obb", "Dados dos aplicativos") { go(Scr.Data) } }
         item { ToolTile(Icons.Default.Lock, "Cofre", "Arquivos privados criptografados") { go(Scr.Vault) } }
         item { ToolTile(Icons.Default.Delete, "Lixeira", "Itens apagados recentemente") { go(Scr.Trash) } }
