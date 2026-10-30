@@ -5,6 +5,7 @@ import android.os.Environment
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -54,6 +55,7 @@ fun HomeScreen(go: (Scr) -> Unit) {
                     LinearProgressIndicator({ if (total > 0) used.toFloat() / total else 0f }, Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp)), color = Color(0xFF8AB4F8), trackColor = Color(0x33FFFFFF))
                     Spacer(Modifier.height(8.dp)); Text("${fmtSize(used)} usados de ${fmtSize(total)} · ${fmtSize(total - used)} livres", color = Color(0xCCFFFFFF), style = MaterialTheme.typography.bodySmall) }
             } }
+        item { DriveCard(go) }
         item { Text("Categorias", style = MaterialTheme.typography.titleMedium) }
         item { val cats = listOf(Triple(Cat.VIDEOS, Icons.Default.Movie, Color(0xFFEF9A9A)), Triple(Cat.IMAGENS, Icons.Default.Image, Color(0xFFA5D6A7)),
                 Triple(Cat.AUDIO, Icons.Default.MusicNote, Color(0xFFCE93D8)), Triple(Cat.DOCS, Icons.Default.Description, Color(0xFF90CAF9)),
@@ -215,4 +217,57 @@ fun TrashScreen(back: () -> Unit) {
     ask?.let { a -> Confirm("Excluir para sempre?", File(a.original).name + " não poderá ser recuperado.", "Excluir", true, { ask = null }) { Trash.purge(a); refresh++ } }
     if (empty) Confirm("Esvaziar lixeira?", "Todos os ${items?.size} itens serão apagados permanentemente.", "Esvaziar", true, { empty = false }) {
         scope.launch { withContext(Dispatchers.IO) { items?.forEach { Trash.purge(it) } }; refresh++ } }
+}
+
+val DRIVE_COLORS = listOf(listOf(Color(0xFF1E3A66), Color(0xFF2B1E4F)), listOf(Color(0xFF0F4C45), Color(0xFF123A5C)),
+    listOf(Color(0xFF5A1E3A), Color(0xFF2B1E4F)), listOf(Color(0xFF5C3A0F), Color(0xFF4F1E2B)), listOf(Color(0xFF263238), Color(0xFF101418)))
+val DRIVE_ACCENT = listOf(Color(0xFF8AB4F8), Color(0xFF80CBC4), Color(0xFFF48FB1), Color(0xFFFFCC80), Color(0xFFB0BEC5))
+
+/** Pasta fixa do "drive" pessoal. Renomear o cartão muda só o rótulo, nunca a pasta (nenhum arquivo é movido). */
+fun driveDir(): File = File(Environment.getExternalStorageDirectory(), "MeuDrive")
+
+fun scanDrive(d: File): Pair<Long, Int> { var b = 0L; var n = 0
+    d.walkTopDown().onFail { _, _ -> }.forEach { if (it.isFile) { b += it.length(); n++ } }; return b to n }
+
+@Composable
+fun DriveColorPicker(m: Modifier = Modifier) {
+    val ctx = LocalContext.current
+    Row(m, horizontalArrangement = Arrangement.spacedBy(12.dp)) { DRIVE_COLORS.forEachIndexed { i, c ->
+        val sel = Prefs.driveColor == i
+        val sz by androidx.compose.animation.core.animateDpAsState(if (sel) 40.dp else 34.dp, label = "sz")
+        Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+            Box(Modifier.size(sz).clip(androidx.compose.foundation.shape.CircleShape).background(Brush.linearGradient(c)).clickable { Prefs.driveColor = i; Prefs.save(ctx) }, contentAlignment = Alignment.Center) {
+                if (sel) Icon(Icons.Default.Check, null, tint = Color.White, modifier = Modifier.size(18.dp)) } } } }
+}
+
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+fun DriveCard(go: (Scr) -> Unit) {
+    val ctx = LocalContext.current
+    val d = remember { driveDir().apply { mkdirs() } }
+    val tick = rememberResumeTick()
+    val total = remember { stat(Environment.getExternalStorageDirectory()).second }
+    var scanning by remember { mutableStateOf(false) }
+    var rename by remember { mutableStateOf(false) }; var colors by remember { mutableStateOf(false) }
+    LaunchedEffect(tick) { scanning = true
+        val (b, n) = withContext(Dispatchers.IO) { scanDrive(d) }
+        Prefs.driveBytes = b; Prefs.driveCount = n; Prefs.save(ctx); scanning = false }
+    val ci = Prefs.driveColor.coerceIn(0, DRIVE_COLORS.lastIndex)
+    val bytes = Prefs.driveBytes.coerceAtLeast(0)
+    val prog by androidx.compose.animation.core.animateFloatAsState(if (total > 0) (bytes.toFloat() / total).coerceIn(0f, 1f) else 0f, label = "p")
+    Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(Brush.linearGradient(DRIVE_COLORS[ci]))
+        .combinedClickable(onLongClick = { rename = true }) { go(Scr.Browse(d.path)) }.padding(20.dp)) {
+        Column { Row(verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Default.FolderSpecial, null, Modifier.shared("dir:" + d.path), tint = Color.White)
+            Spacer(Modifier.width(10.dp)); Text(Prefs.driveName, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium, color = Color.White, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+            Icon(Icons.Default.Palette, "Cor", Modifier.size(32.dp).clip(RoundedCornerShape(10.dp)).clickable { colors = true }.padding(6.dp), tint = Color(0xCCFFFFFF))
+            Icon(Icons.Default.Edit, "Renomear", Modifier.size(32.dp).clip(RoundedCornerShape(10.dp)).clickable { rename = true }.padding(6.dp), tint = Color(0xCCFFFFFF)) }
+            Spacer(Modifier.height(14.dp))
+            LinearProgressIndicator({ prog }, Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp)), color = DRIVE_ACCENT[ci], trackColor = Color(0x33FFFFFF))
+            Spacer(Modifier.height(8.dp))
+            val cnt = java.text.NumberFormat.getIntegerInstance(java.util.Locale("pt", "BR")).format(Prefs.driveCount)
+            Text(if (Prefs.driveBytes < 0) "Calculando…" else "${fmtSize(bytes)} · $cnt ${if (Prefs.driveCount == 1) "arquivo" else "arquivos"}" + (if (scanning) " · atualizando" else ""),
+                color = Color(0xCCFFFFFF), style = MaterialTheme.typography.bodySmall) }
+    }
+    if (rename) InputDialog("Renomear cartão", Prefs.driveName, { rename = false }) { n -> val t = n.trim(); if (t.isNotEmpty()) { Prefs.driveName = t.take(40); Prefs.save(ctx) } }
+    if (colors) AlertDialog({ colors = false }, confirmButton = { TextButton({ colors = false }) { Text("Pronto") } }, title = { Text("Cor do cartão") }, text = { DriveColorPicker() })
 }

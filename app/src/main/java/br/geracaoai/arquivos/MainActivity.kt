@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -94,11 +95,14 @@ fun Root(act: FragmentActivity) {
     BackHandlerCompat(stack.size > 1) { stack.removeAt(stack.lastIndex) }
     val tabs = listOf(Triple(Scr.Home, "Início", Icons.Default.Home), Triple(Scr.Dups, "Duplicados", Icons.Default.VideoLibrary),
         Triple(Scr.Apps, "Apps", Icons.Default.Apps), Triple(Scr.Tools, "Ferramentas", Icons.Default.Build))
+    var settings by remember { mutableStateOf(false) }
     Scaffold(bottomBar = {
         NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
+            NavigationBarItem(selected = false, onClick = { settings = true }, icon = { Icon(Icons.Default.Menu, "Configurações") }, label = { Text("Menu") })
             tabs.forEach { (s, l, i) -> NavigationBarItem(selected = stack.first() == s, onClick = { tab(s) }, icon = { Icon(i, null) }, label = { Text(l) }) }
         }
     }) { pad ->
+        if (settings) SettingsSheet { settings = false }
         Box(Modifier.padding(pad).graphicsLayer { val p = Nav.progress; scaleX = 1f - 0.08f * p; scaleY = 1f - 0.08f * p; alpha = 1f - 0.3f * p
             shape = RoundedCornerShape((32 * p).dp); clip = p > 0f }) {
          SharedTransitionLayout {
@@ -128,6 +132,40 @@ fun Root(act: FragmentActivity) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsSheet(onDismiss: () -> Unit) {
+    val ctx = LocalContext.current
+    ModalBottomSheet(onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true), containerColor = MaterialTheme.colorScheme.surface) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 28.dp).verticalScrollCompat()) {
+            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) { Icon(Icons.Default.Settings, null, tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.width(10.dp))
+                Text("Configurações", style = MaterialTheme.typography.headlineSmall) }
+            Text("Tema", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 20.dp, bottom = 8.dp))
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) { listOf("Sistema", "Escuro", "Claro").forEachIndexed { i, s ->
+                SegmentedButton(Prefs.theme == i, { Prefs.theme = i; Prefs.save(ctx) }, SegmentedButtonDefaults.itemShape(i, 3)) { Text(s) } } }
+            Text("Navegação", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 20.dp))
+            SettingSwitch("Mostrar arquivos ocultos", "Exibe itens que começam com ponto", Prefs.showHidden) { Prefs.showHidden = it; Prefs.save(ctx) }
+            SettingSwitch("Visualização em grade", "Mostra pastas e arquivos como blocos", Prefs.grid) { Prefs.grid = it; Prefs.save(ctx) }
+            Text("Ordenar por", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp, bottom = 8.dp))
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) { SORTS.forEachIndexed { i, s ->
+                FilterChip(Prefs.sort == i, { Prefs.sort = i; Prefs.save(ctx) }, { Text(s) }) } }
+            Text("Meu drive", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 20.dp, bottom = 8.dp))
+            Text("Pasta: ${driveDir().path}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            DriveColorPicker(Modifier.padding(top = 10.dp))
+            HorizontalDivider(Modifier.padding(vertical = 16.dp))
+            Text("Gerenciador de Arquivos · versão ${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+fun SettingSwitch(title: String, sub: String, v: Boolean, on: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) { Text(title, style = MaterialTheme.typography.bodyLarge); Text(sub, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        Switch(v, on)
+    }
+}
+
 @Composable
 fun ToolTile(icon: ImageVector, title: String, sub: String, onClick: () -> Unit) {
     ElevatedCard(onClick, Modifier.fillMaxWidth().padding(vertical = 5.dp), colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
@@ -151,10 +189,6 @@ fun ToolsScreen(go: (Scr) -> Unit) {
         ToolTile(Icons.Default.Delete, "Lixeira", "Restaure ou apague definitivamente") { go(Scr.Trash) }
         ToolTile(Icons.Default.ContentCopy, "Duplicados", "Vídeos, imagens e outros arquivos repetidos") { go(Scr.Dups) }
         ToolTile(Icons.Default.Apps, "Apps ocultos e do sistema", "Gerenciador de aplicativos") { go(Scr.Apps) }
-        val ctx = LocalContext.current
-        Text("Tema", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 12.dp))
-        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) { listOf("Sistema", "Escuro", "Claro").forEachIndexed { i, s ->
-            SegmentedButton(Prefs.theme == i, { Prefs.theme = i; Prefs.save(ctx) }, SegmentedButtonDefaults.itemShape(i, 3)) { Text(s) } } }
         Text("Versão ${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 16.dp))
     }
 }
