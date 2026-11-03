@@ -71,8 +71,10 @@ object Junk {
         val empty = r.walkBottomUp().filter { it.isDirectory && it != r && it.listFiles()?.isEmpty() == true && !it.path.contains("/Android/") && !it.path.contains(".LixeiraGerenciador") }.toList()
         val installed = pm.getInstalledApplications(0).map { it.packageName }.toSet()
         val orphans = File(r, "Android/media").listFiles().orEmpty().filter { it.isDirectory && it.name.contains('.') && it.name !in installed }
-        return listOf(Group("Status", "Status/stories de WhatsApp, Telegram e outros salvos sem você pedir", status.sortedByDescending { it.length() }, true),
-            Group("Ícones e figurinhas", "Imagens minúsculas (até 40 KB / 256 px) fora da galeria", icons, true),
+        val sv = status.filter { (it.ext.ifEmpty { Carver.sniff(it) ?: "" }) in VIDEO }
+        return listOf(Group("Vídeos de status", "Status/stories de WhatsApp, Telegram e outros salvos sem você pedir", sv.sortedByDescending { it.length() }, true),
+            Group("Fotos de status", "Fotos de status/stories salvas automaticamente", (status - sv.toSet()).sortedByDescending { it.length() }, true),
+            Group("Ícones (fotos-ícone pequenas)", "Imagens minúsculas (até 40 KB / 256 px) fora da galeria", icons, true),
             Group("Miniaturas e caches de mídia", ".thumbnails e caches em Android/media — o Android recria", mcache.sortedByDescending { it.length() }, true),
             Group("Arquivos temporários", ".tmp, .bak, Thumbs.db…", tmp),
             Group("Logs", "Arquivos .log", logs), Group("APKs já instalados", "Instaladores de apps que você já tem", apks),
@@ -89,10 +91,10 @@ fun JunkScreen(back: () -> Unit) {
     var ask by remember { mutableStateOf(false) }; var msg by remember { mutableStateOf<String?>(null) }
     var job by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     fun scan() { busy = true; job = scope.launch { try { groups = withContext(Dispatchers.IO) { Junk.scan(ctx) }; sel.clear()
-        groups!!.filter { it.label in setOf("Status", "Miniaturas e caches de mídia", "Arquivos temporários") }.forEach { g -> g.files.forEach { sel[it.path] = true } } } finally { busy = false } } }
+        groups!!.filter { it.label in setOf("Vídeos de status", "Fotos de status", "Miniaturas e caches de mídia", "Arquivos temporários") }.forEach { g -> g.files.forEach { sel[it.path] = true } } } finally { busy = false } } }
     val chosen = groups.orEmpty().flatMap { it.files }.filter { sel[it.path] == true }
     val total = chosen.sumOf { if (it.isFile) it.length() else it.walkTopDown().sumOf { f -> f.length() } }
-    Scaffold(contentWindowInsets = WindowInsets(0, 0, 0, 0), topBar = { Bar("Arquivos inúteis", groups?.let { "${fmtSize(it.sumOf { g -> g.size })} encontrados" }, back) {
+    Scaffold(contentWindowInsets = WindowInsets(0, 0, 0, 0), topBar = { Bar("Buscar lixos inúteis", groups?.let { "${fmtSize(it.sumOf { g -> g.size })} encontrados" }, back) {
             if (busy) TextButton({ job?.cancel() }) { Text("Cancelar") } else if (groups != null) TextButton({ scan() }) { Text("Analisar de novo") } } },
         bottomBar = { if (chosen.isNotEmpty()) Row(Modifier.fillMaxWidth().padding(12.dp)) {
             OutlinedButton({ sel.clear() }, Modifier.height(56.dp)) { Text("Limpar seleção") }; Spacer(Modifier.width(8.dp))
@@ -108,7 +110,7 @@ fun JunkScreen(back: () -> Unit) {
                     item(key = "h" + g.label) { ElevatedCard(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
                         ListItem({ Text(g.label) }, Modifier.clickable { open = if (open == g.label) null else g.label },
                             supportingContent = { Text("${g.files.size} itens · ${fmtSize(g.size)}" + (if (n > 0) " · $n marcados" else "") + "\n${g.desc}") },
-                            leadingContent = { Icon(when (g.label) { "Status" -> Icons.Default.AutoAwesome; "Ícones e figurinhas" -> Icons.Default.EmojiEmotions; else -> Icons.Default.CleaningServices }, null, tint = MaterialTheme.colorScheme.primary) },
+                            leadingContent = { Icon(when (g.label) { "Vídeos de status" -> Icons.Default.Movie; "Fotos de status" -> Icons.Default.AutoAwesome; "Ícones (fotos-ícone pequenas)" -> Icons.Default.EmojiEmotions; else -> Icons.Default.CleaningServices }, null, tint = MaterialTheme.colorScheme.primary) },
                             trailingContent = { TriStateCheckbox(when (n) { 0 -> androidx.compose.ui.state.ToggleableState.Off; g.files.size -> androidx.compose.ui.state.ToggleableState.On; else -> androidx.compose.ui.state.ToggleableState.Indeterminate }, {
                                 val on = n < g.files.size; g.files.forEach { if (on) sel[it.path] = true else sel.remove(it.path) } }) }) } }
                     if (open == g.label) {
@@ -127,4 +129,36 @@ fun JunkScreen(back: () -> Unit) {
         ask = false; val fs = chosen.toList()
         scope.launch { var ok = 0; withContext(Dispatchers.IO) { fs.forEach { if (it.exists() && !JunkRules.isProtected(it.path.removePrefix(primaryRoot.path).trimStart('/')) && Trash.moveToTrash(ctx, it)) ok++ } }
             msg = "✓ $ok itens movidos para a lixeira · ${fmtSize(total)}"; scan() } }
+}
+
+
+@Composable
+fun AppFoldersScreen(go: (Scr) -> Unit, back: () -> Unit) {
+    val ctx = LocalContext.current
+    data class AF(val dir: File, val label: String, val where: String)
+    var list by remember { mutableStateOf<List<AF>?>(null) }; var blocked by remember { mutableStateOf(listOf<String>()) }
+    LaunchedEffect(Unit) { withContext(Dispatchers.IO) { val pm = ctx.packageManager; val bl = ArrayList<String>(); val out = ArrayList<AF>()
+        listOf("media", "data", "obb").forEach { s -> val kids = File(primaryRoot, "Android/$s").listFiles()
+            if (kids == null || (s != "media" && kids.isEmpty())) bl += "Android/$s"
+            kids.orEmpty().filter { it.isDirectory }.forEach { k -> out += AF(k, runCatching { pm.getApplicationLabel(pm.getApplicationInfo(k.name, 0)).toString() }.getOrDefault(k.name), "Android/$s") } }
+        list = out.sortedBy { it.label.lowercase() }; blocked = bl } }
+    Scaffold(contentWindowInsets = WindowInsets(0, 0, 0, 0), topBar = { Bar("Pastas de apps", list?.let { "${it.size} pastas" }, back) }) { pad ->
+        LazyColumn(Modifier.padding(pad), contentPadding = PaddingValues(12.dp)) {
+            if (blocked.isNotEmpty()) item { Text("🔒 " + blocked.joinToString() + ": o Android bloqueia essas pastas sem root. Tente em Ferramentas > Android/data e obb (permissão de pasta, quando o Android permitir).",
+                Modifier.padding(bottom = 8.dp).clickable { go(Scr.Data) }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary) }
+            if (list == null) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
+            items(list.orEmpty(), key = { it.dir.path }) { a -> ListItem({ Text(a.label) }, Modifier.clickable { Nav.openFolder(a.dir.path) },
+                supportingContent = { Text(a.where + "/" + a.dir.name, maxLines = 1) }, leadingContent = { Icon(Icons.Default.FolderSpecial, null, tint = MaterialTheme.colorScheme.primary) }) }
+        }
+    }
+}
+
+/** "Abrir pasta" de um achado; avisa quando a pasta é inacessível. */
+fun openParentFolder(ctx: Context, path: String, protectedReason: String? = null) {
+    val parent = File(path).parentFile
+    when {
+        protectedReason != null -> toast(ctx, protectedReason)
+        parent == null || parent.listFiles() == null -> toast(ctx, "A pasta ${parent?.path?.removePrefix(primaryRoot.path) ?: ""} é protegida pelo Android (sem root não dá para abrir). Use Recuperar para copiar o arquivo.")
+        else -> Nav.openFolder(parent.path)
+    }
 }

@@ -34,3 +34,21 @@ class JunkTabsTest {
         assertEquals(l, Tabs.decode(Tabs.encode(l)))
     }
 }
+
+class TabStateTest {
+    @Test fun openReuseAndLimit() {
+        var l = emptyList<String>(); var idx = -1
+        for (i in 1..9) { val r = Tabs.open(l, "/d$i"); l = r.first; idx = r.second }
+        assertEquals(8, l.size); assertEquals("/d2", l.first()); assertEquals(7, idx)
+        val r = Tabs.open(l, "/d4"); assertEquals(l, r.first); assertEquals(2, r.second)
+    }
+    @Test fun updateAndClose() {
+        val l = listOf("/a", "/b", "/c")
+        assertEquals(listOf("/a", "/b/x", "/c"), Tabs.update(l, 1, "/b/x"))
+        assertEquals(l, Tabs.update(l, 9, "/z"))
+        assertEquals(listOf("/a", "/c"), Tabs.close(l, 1))
+        assertEquals(0, Tabs.pageAfterClose(0, 1, 2))   // no Início: fica
+        assertEquals(1, Tabs.pageAfterClose(2, 0, 2))   // fechou anterior: recua
+        assertEquals(2, Tabs.pageAfterClose(3, 2, 2))   // fechou a atual (última): vai p/ anterior
+    }
+}

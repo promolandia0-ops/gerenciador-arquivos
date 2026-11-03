@@ -3,6 +3,7 @@ package br.geracaoai.arquivos
 import android.content.Context
 import android.os.Environment
 import androidx.compose.animation.*
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -46,11 +47,15 @@ fun HomeScreen(go: (Scr) -> Unit, openTab: (String) -> Unit = {}) {
     val vols = remember { volumes(ctx) }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { Text("Arquivos", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.Bold) }
+        item { ElevatedCard({ go(Scr.Junk) }, Modifier.fillMaxWidth(), colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)) {
+            Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Default.CleaningServices, null, Modifier.size(32.dp), tint = MaterialTheme.colorScheme.onTertiaryContainer); Spacer(Modifier.width(14.dp))
+                Column { Text("Buscar lixos inúteis", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onTertiaryContainer)
+                    Text("Ícones, vídeos e fotos de status, miniaturas e caches", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onTertiaryContainer) } } } }
         if (Nav.tabs.isNotEmpty()) item {
-            Column { Text("Abas recentes (${Nav.tabs.size}/8) · deslize ← para voltar", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Column { Text("Abas abertas (${Nav.tabs.size}/8) · deslize ← para ir até elas", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 androidx.compose.foundation.lazy.LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp), contentPadding = PaddingValues(top = 4.dp)) {
                     items(Nav.tabs.toList(), key = { it }) { t -> InputChip(false, { openTab(t) }, { Text(File(t).name.ifEmpty { "Armazenamento" }, maxLines = 1) }, leadingIcon = { Icon(Icons.Default.Folder, null, Modifier.size(18.dp)) },
-                        trailingIcon = { Icon(Icons.Default.Close, "Fechar aba", Modifier.size(16.dp).clickable { Nav.tabs.remove(t); Nav.save(ctx) }) }) } } } }
+                        trailingIcon = { Icon(Icons.Default.Close, "Fechar aba", Modifier.size(16.dp).clickable { Nav.set(ctx, Tabs.close(Nav.tabs, Nav.tabs.indexOf(t))) }) }) } } } }
         items(vols) { v -> val (used, total) = remember(v) { stat(v.root) }
             Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(Brush.linearGradient(listOf(Color(0xFF1E3A66), Color(0xFF2B1E4F))))
                 .clickable { go(Scr.Browse(v.root.path)) }.padding(20.dp)) {
@@ -72,6 +77,7 @@ fun HomeScreen(go: (Scr) -> Unit, openTab: (String) -> Unit = {}) {
         item { ToolTile(Icons.Default.History, "Recentes", "Modificados nos últimos 7 dias") { go(Scr.Recent) } }
         item { ToolTile(Icons.Default.VideoLibrary, "Vídeos duplicados", "Libere espaço apagando cópias") { go(Scr.Dups) } }
         item { ToolTile(Icons.Default.VisibilityOff, "Ocultos", "Fotos e vídeos escondidos") { go(Scr.Hidden) } }
+        item { ToolTile(Icons.Default.FolderSpecial, "Pastas de apps", "Todas as pastas de aplicativos (Android/media, data, obb)") { go(Scr.AppFolders) } }
         item { ToolTile(Icons.Default.Android, "Android/data e obb", "Dados dos aplicativos") { go(Scr.Data) } }
         item { ToolTile(Icons.Default.Lock, "Cofre", "Arquivos privados criptografados") { go(Scr.Vault) } }
         item { ToolTile(Icons.Default.Delete, "Lixeira", "Itens apagados recentemente") { go(Scr.Trash) } }
@@ -88,7 +94,7 @@ fun CatTile(label: String, ic: ImageVector, col: Color, m: Modifier, onClick: ()
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun BrowserScreen(dir: String, onNavigate: (String) -> Unit, go: (Scr) -> Unit, back: () -> Unit) {
+fun BrowserScreen(dir: String, onNavigate: (String) -> Unit, go: (Scr) -> Unit, back: () -> Unit, active: Boolean = true) {
     val ctx = LocalContext.current; val scope = rememberCoroutineScope()
     LaunchedEffect(Unit) { Prefs.load(ctx) }
     val d = File(dir)
@@ -111,8 +117,8 @@ fun BrowserScreen(dir: String, onNavigate: (String) -> Unit, go: (Scr) -> Unit, 
     val gridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState(sp?.first ?: 0, sp?.second ?: 0)
     DisposableEffect(dir) { onDispose { Nav.scroll[dir] = if (Prefs.grid) gridState.firstVisibleItemIndex to gridState.firstVisibleItemScrollOffset else listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
         ctx.getSharedPreferences("prefs", 0).edit().putString("lastDir", dir).apply() } }
-    BackHandlerCompat(sel.isNotEmpty()) { sel.clear() }
-    BackHandlerCompat(sel.isEmpty() && d.parentFile != null && volumes(ctx).none { it.root == d }) { onNavigate(d.parent!!) }
+    BackHandlerCompat(active && sel.isNotEmpty()) { sel.clear() }
+    BackHandlerCompat(active && sel.isEmpty() && d.parentFile != null && volumes(ctx).none { it.root == d }) { onNavigate(d.parent!!) }
     Scaffold(contentWindowInsets = WindowInsets(0, 0, 0, 0), topBar = {
         if (searching) TopAppBar(windowInsets = WindowInsets(0, 0, 0, 0), title = { OutlinedTextField(query, { query = it }, placeholder = { Text("Buscar em ${d.name}") }, singleLine = true, modifier = Modifier.fillMaxWidth()) },
             navigationIcon = { IconButton({ searching = false; query = "" }) { Icon(Icons.Default.Close, null) } })
@@ -280,4 +286,19 @@ fun DriveCard(go: (Scr) -> Unit) {
     }
     if (rename) InputDialog("Renomear cartão", Prefs.driveName, { rename = false }) { n -> val t = n.trim(); if (t.isNotEmpty()) { Prefs.driveName = t.take(40); Prefs.save(ctx) } }
     if (colors) AlertDialog({ colors = false }, confirmButton = { TextButton({ colors = false }) { Text("Pronto") } }, title = { Text("Cor do cartão") }, text = { DriveColorPicker() })
+}
+
+
+/** Início + abas de pastas num pager: página 0 = Início, 1..N = abas (cada uma com sua pasta e rolagem). */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+fun HomePager(pager: androidx.compose.foundation.pager.PagerState, go: (Scr) -> Unit, openTab: (String) -> Unit, home: () -> Unit) {
+    val ctx = LocalContext.current
+    BackHandlerCompat(pager.currentPage > 0) { home() }
+    androidx.compose.foundation.pager.HorizontalPager(pager, Modifier.fillMaxSize(), beyondViewportPageCount = 1, key = { it }) { p ->
+        if (p == 0) HomeScreen(go, openTab) else { val i = p - 1; val dir = Nav.tabs.getOrNull(i)
+            if (dir != null) AnimatedContent(dir, transitionSpec = { val fwd = targetState.startsWith(initialState + "/")
+                (fadeIn(tween(220)) + scaleIn(tween(240), initialScale = if (fwd) 0.96f else 1.03f)) togetherWith (fadeOut(tween(150)) + scaleOut(tween(200), targetScale = if (fwd) 1.03f else 0.96f)) }, label = "tab$i") { d ->
+                BrowserScreen(d, onNavigate = { Nav.set(ctx, Tabs.update(Nav.tabs, i, it)) }, go = go, back = home, active = pager.currentPage == p) } }
+    }
 }

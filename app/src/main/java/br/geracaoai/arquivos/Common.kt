@@ -39,9 +39,9 @@ object Prefs {
     var driveBytes by mutableLongStateOf(-1L); var driveCount by mutableIntStateOf(0)
     private var loaded = false
     fun load(c: Context) { if (loaded) return; loaded = true; val p = c.getSharedPreferences("prefs", 0)
-        showHidden = p.getBoolean("h", false); grid = p.getBoolean("g", false); sort = p.getInt("s", 0); theme = p.getInt("t", 0); root = p.getBoolean("r", false)
+        showHidden = p.getBoolean("h2", true); grid = p.getBoolean("g", false); sort = p.getInt("s", 0); theme = p.getInt("t", 0); root = p.getBoolean("r", false)
         driveName = p.getString("dn", "Meus arquivos") ?: "Meus arquivos"; driveColor = p.getInt("dcol", 0); driveBytes = p.getLong("db", -1L); driveCount = p.getInt("dc", 0) }
-    fun save(c: Context) = c.getSharedPreferences("prefs", 0).edit().putBoolean("h", showHidden).putBoolean("g", grid).putInt("s", sort).putInt("t", theme).putBoolean("r", root).putString("dn", driveName).putInt("dcol", driveColor).putLong("db", driveBytes).putInt("dc", driveCount).apply()
+    fun save(c: Context) = c.getSharedPreferences("prefs", 0).edit().putBoolean("h2", showHidden).putBoolean("g", grid).putInt("s", sort).putInt("t", theme).putBoolean("r", root).putString("dn", driveName).putInt("dcol", driveColor).putLong("db", driveBytes).putInt("dc", driveCount).apply()
 }
 val SORTS = listOf("Nome (A-Z)", "Nome (Z-A)", "Mais recentes", "Mais antigos", "Maiores", "Menores", "Tipo")
 fun sortFiles(l: List<File>, s: Int): List<File> {

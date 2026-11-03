@@ -406,6 +406,7 @@ fun MediaViewer(i: RItem, close: () -> Unit, onRecover: () -> Unit) {
                     Column(Modifier.weight(1f)) { Text(i.name, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text("${i.cat.label} · ${fmtSize(i.size)}" + (if (i.modified > 0) " · " + fmtDate(i.modified) else ""), color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelSmall)
                         Text(i.path.removePrefix(primaryRoot.path), color = Color.White.copy(alpha = 0.6f), style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                    IconButton({ close(); openParentFolder(ctx, i.path, when { i.carved != null -> "Este item foi extraído de dentro de ${i.path.substringAfterLast('/')}; abrindo a pasta desse arquivo." .also { Nav.openFolder(File(i.path).parent ?: "") }; i.priv || i.uri != null -> "Esta pasta (${i.path.substringBeforeLast('/').removePrefix(primaryRoot.path)}) é protegida pelo Android sem root. Use Recuperar para copiar."; else -> null }) }) { Icon(Icons.Default.FolderOpen, "Abrir pasta", tint = Color.White) }
                     if (f != null) IconButton({ openWith(ctx, f, true) }) { Icon(Icons.AutoMirrored.Filled.OpenInNew, "Abrir com", tint = Color.White) }
                     IconButton(onRecover) { Icon(Icons.Default.SettingsBackupRestore, "Recuperar", tint = Color.White) }
                 }

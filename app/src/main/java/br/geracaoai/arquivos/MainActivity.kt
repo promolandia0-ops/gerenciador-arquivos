@@ -1,5 +1,6 @@
 package br.geracaoai.arquivos
 
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -50,7 +51,9 @@ object Nav { var progress by mutableFloatStateOf(0f)
     var swipeDx by mutableFloatStateOf(0f)
     fun load(ctx: android.content.Context) { if (tabs.isEmpty()) tabs.addAll(Tabs.decode(ctx.getSharedPreferences("prefs", 0).getString("tabs", null) ?: ctx.getSharedPreferences("prefs", 0).getString("lastDir", null)).filter { java.io.File(it).isDirectory }) }
     fun save(ctx: android.content.Context) = ctx.getSharedPreferences("prefs", 0).edit().putString("tabs", Tabs.encode(tabs)).apply()
-    fun push(ctx: android.content.Context, dir: String) { val n = Tabs.push(tabs, dir); tabs.clear(); tabs.addAll(n); save(ctx) }
+    fun set(ctx: android.content.Context, n: List<String>) { if (n != tabs.toList()) { tabs.clear(); tabs.addAll(n) }; save(ctx) }
+    /** Definido pela tela raiz: abre uma pasta numa aba (usado por "Abrir pasta"). */
+    var openFolder: (String) -> Unit = {}
 }
 
 /** Lógica pura das abas (testável). */
@@ -58,6 +61,13 @@ object Tabs {
     const val MAX = 8
     fun push(l: List<String>, dir: String, max: Int = MAX) = (listOf(dir) + l.filter { it != dir }).take(max)
     fun next(l: List<String>, cur: String?): String? = if (l.isEmpty()) null else l[(l.indexOf(cur) + 1).mod(l.size)]
+    /** Abre [dir] como aba: reaproveita a aba igual; senão adiciona no fim (descarta a mais antiga se passar de [max]). Retorna lista e índice. */
+    fun open(l: List<String>, dir: String, max: Int = MAX): Pair<List<String>, Int> { val i = l.indexOf(dir); if (i >= 0) return l to i
+        val n = (l + dir).takeLast(max); return n to n.lastIndex }
+    fun update(l: List<String>, i: Int, dir: String) = if (i in l.indices) l.toMutableList().also { it[i] = dir } else l
+    fun close(l: List<String>, i: Int) = l.filterIndexed { j, _ -> j != i }
+    /** Página do pager a mostrar após fechar a aba i estando na página [page] (0 = Início). */
+    fun pageAfterClose(page: Int, i: Int, newSize: Int) = (if (page - 1 > i) page - 1 else if (page - 1 == i) minOf(page, newSize) else page).coerceIn(0, newSize)
     fun encode(l: List<String>) = l.joinToString("\n")
     fun decode(s: String?) = s.orEmpty().split('\n').filter { it.isNotBlank() }.take(MAX)
 }
@@ -71,7 +81,7 @@ val LocalAVS = compositionLocalOf<AnimatedVisibilityScope?> { null }
 sealed class Scr {
     data object Home : Scr(); data class Browse(val dir: String) : Scr(); data class Category(val cat: Cat) : Scr()
     data object Recent : Scr(); data object Dups : Scr(); data object Apps : Scr(); data object Hidden : Scr()
-    data object Data : Scr(); data object Vault : Scr(); data object Trash : Scr(); data object Tools : Scr(); data object Recover : Scr(); data object Junk : Scr()
+    data object Data : Scr(); data object Vault : Scr(); data object Trash : Scr(); data object Tools : Scr(); data object Recover : Scr(); data object Junk : Scr(); data object AppFolders : Scr()
 }
 
 class MainActivity : FragmentActivity() {
@@ -113,35 +123,27 @@ fun Root(act: FragmentActivity) {
     }
     val stack = remember { mutableStateListOf<Scr>(Scr.Home) }
     val cur = stack.last()
-    fun go(s: Scr) { stack.add(s) }
+    fun go(s: Scr) { if (s is Scr.Browse) Nav.openFolder(s.dir) else stack.add(s) }
     fun tab(s: Scr) { stack.clear(); stack.add(s) }
     BackHandlerCompat(stack.size > 1) { stack.removeAt(stack.lastIndex) }
     remember { Nav.load(ctx); 0 }
-    fun jumpHome() { (stack.last() as? Scr.Browse)?.let { Nav.push(ctx, it.dir) }; stack.clear(); stack.add(Scr.Home) }
-    fun openTab(dir: String) { stack.clear(); stack.add(Scr.Home); stack.add(Scr.Browse(dir)) }
-    val swipeScope = rememberCoroutineScope()
-    fun settle() { val from = Nav.swipeDx; swipeScope.launch { androidx.compose.animation.core.animate(from, 0f, animationSpec = tween(180)) { v, _ -> Nav.swipeDx = v } } }
-    val density = androidx.compose.ui.platform.LocalDensity.current; val trigger = with(density) { 96.dp.toPx() }
+    val pager = androidx.compose.foundation.pager.rememberPagerState { 1 + Nav.tabs.size }
+    val pscope = rememberCoroutineScope()
+    fun openTab(dir: String) { val (n, idx) = Tabs.open(Nav.tabs, dir); Nav.set(ctx, n); stack.clear(); stack.add(Scr.Home)
+        pscope.launch { kotlinx.coroutines.withTimeoutOrNull(1000) { androidx.compose.runtime.snapshotFlow { pager.pageCount }.first { it > idx + 1 } }; if (kotlin.math.abs(pager.currentPage - (idx + 1)) > 1) pager.scrollToPage(idx + 1) else pager.animateScrollToPage(idx + 1) } }
+    Nav.openFolder = ::openTab
+    fun goHomePage() = pscope.launch { pager.animateScrollToPage(0) }
     val tabs = listOf(Triple(Scr.Home, "Início", Icons.Default.Home), Triple(Scr.Dups, "Duplicados", Icons.Default.VideoLibrary),
         Triple(Scr.Apps, "Apps", Icons.Default.Apps), Triple(Scr.Tools, "Ferramentas", Icons.Default.Build))
     var settings by remember { mutableStateOf(false) }
     Scaffold(bottomBar = {
         NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
             NavigationBarItem(selected = false, onClick = { settings = true }, icon = { Icon(Icons.Default.Menu, "Configurações") }, label = { Text("Menu") })
-            tabs.forEach { (s, l, i) -> NavigationBarItem(selected = stack.first() == s, onClick = { tab(s) }, icon = { Icon(i, null) }, label = { Text(l) }) }
+            tabs.forEach { (s, l, i) -> NavigationBarItem(selected = stack.first() == s, onClick = { if (s == Scr.Home && stack.size == 1 && stack[0] == Scr.Home) goHomePage(); tab(s) }, icon = { Icon(i, null) }, label = { Text(l) }) }
         }
     }) { pad ->
         if (settings) SettingsSheet { settings = false }
-        val curDir = (cur as? Scr.Browse)?.dir; val isHome = cur == Scr.Home
-        Box(Modifier.padding(pad).pointerInput(curDir, isHome) {
-            if (curDir == null && !isHome) return@pointerInput
-            var acc = 0f
-            detectHorizontalDragGestures(onDragStart = { acc = 0f }, onDragCancel = { settle() },
-                onDragEnd = { settle()
-                    if (curDir != null && acc > trigger) jumpHome()
-                    else if (acc < -trigger) { val t = if (isHome) Nav.tabs.firstOrNull() else Tabs.next(Nav.tabs, curDir); if (t != null && t != curDir) openTab(t) } }) { ch, dx ->
-                ch.consume(); acc += dx; Nav.swipeDx = acc.coerceIn(-size.width * 0.5f, size.width * 0.5f) }
-        }.graphicsLayer { translationX = Nav.swipeDx * 0.3f
+        Box(Modifier.padding(pad).graphicsLayer {
              val p = Nav.progress; scaleX = 1f - 0.08f * p; scaleY = 1f - 0.08f * p; alpha = 1f - 0.3f * p
             shape = RoundedCornerShape((32 * p).dp); clip = p > 0f }) {
          SharedTransitionLayout {
@@ -165,7 +167,7 @@ fun Root(act: FragmentActivity) {
           }, contentKey = { if (it is Scr.Browse) "b" + it.dir else it.toString() }, label = "nav") { cur ->
            CompositionLocalProvider(LocalSTS provides this@SharedTransitionLayout, LocalAVS provides this@AnimatedContent) {
             when (cur) {
-                Scr.Home -> HomeScreen(::go, { openTab(it) })
+                Scr.Home -> HomePager(pager, ::go, ::openTab) { goHomePage() }
                 is Scr.Browse -> BrowserScreen(cur.dir, onNavigate = { stack[stack.lastIndex] = Scr.Browse(it) }, go = ::go, back = { stack.removeAt(stack.lastIndex) })
                 is Scr.Category -> FileListScreen(cur.cat.label, { loadCategory(ctx, cur.cat) }, ::go) { stack.removeAt(stack.lastIndex) }
                 Scr.Recent -> FileListScreen("Recentes", { loadRecent(ctx) }, ::go) { stack.removeAt(stack.lastIndex) }
@@ -178,6 +180,7 @@ fun Root(act: FragmentActivity) {
                 Scr.Tools -> ToolsScreen(::go)
                 Scr.Recover -> RecoverScreen { stack.removeAt(stack.lastIndex) }
                 Scr.Junk -> JunkScreen { stack.removeAt(stack.lastIndex) }
+                Scr.AppFolders -> AppFoldersScreen(::go) { stack.removeAt(stack.lastIndex) }
             }
            }
           }
@@ -236,7 +239,8 @@ fun ToolsScreen(go: (Scr) -> Unit) {
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScrollCompat()) {
         Text("Ferramentas", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(bottom = 8.dp))
         ToolTile(Icons.Default.ManageSearch, "Busca intensa / Recuperar", "Lixeiras, caches, miniaturas, blobs, extensão trocada, órfãos") { go(Scr.Recover) }
-        ToolTile(Icons.Default.CleaningServices, "Arquivos inúteis", "Status dos outros, ícones, miniaturas, caches, temporários (vai para a lixeira)") { go(Scr.Junk) }
+        ToolTile(Icons.Default.CleaningServices, "Buscar lixos inúteis", "Ícones, vídeos e fotos de status, miniaturas, caches (vai para a lixeira)") { go(Scr.Junk) }
+        ToolTile(Icons.Default.FolderSpecial, "Pastas de apps", "Todas as pastas de aplicativos, inclusive ocultas") { go(Scr.AppFolders) }
         ToolTile(Icons.Default.VisibilityOff, "Fotos e vídeos ocultos", "Mídias escondidas em pastas com ponto e .nomedia") { go(Scr.Hidden) }
         ToolTile(Icons.Default.Android, "Android/data e obb", "Acesso via SAF ou Shizuku (Android 11 a 15)") { go(Scr.Data) }
         ToolTile(Icons.Default.Lock, "Cofre", "Esconda arquivos com criptografia AES-256 e PIN/biometria") { go(Scr.Vault) }
