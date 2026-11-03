@@ -110,8 +110,8 @@ fun FileCell(f: File, selected: Boolean, onClick: () -> Unit, onLong: () -> Unit
 fun animateColorAsStateCompat(c: Color) = androidx.compose.animation.animateColorAsState(c, label = "c")
 
 @Composable
-fun EmptyState(icon: ImageVector, title: String, sub: String = "") {
-    Column(Modifier.fillMaxSize().padding(32.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+fun EmptyState(icon: ImageVector, title: String, sub: String = "", fill: Boolean = true) {
+    Column((if (fill) Modifier.fillMaxSize() else Modifier.fillMaxWidth()).padding(32.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
         Box(Modifier.size(112.dp).clip(RoundedCornerShape(36.dp)).background(MaterialTheme.colorScheme.primaryContainer), contentAlignment = Alignment.Center) {
             Icon(icon, null, Modifier.size(56.dp), tint = MaterialTheme.colorScheme.primary) }
         Spacer(Modifier.height(20.dp)); Text(title, style = MaterialTheme.typography.titleLarge)

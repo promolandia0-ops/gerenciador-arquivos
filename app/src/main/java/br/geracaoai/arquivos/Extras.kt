@@ -90,21 +90,26 @@ fun JunkScreen(back: () -> Unit) {
     val sel = remember { mutableStateMapOf<String, Boolean>() }; var open by remember { mutableStateOf<String?>(null) }
     var ask by remember { mutableStateOf(false) }; var msg by remember { mutableStateOf<String?>(null) }
     var job by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
-    fun scan() { busy = true; job = scope.launch { try { groups = withContext(Dispatchers.IO) { Junk.scan(ctx) }; sel.clear()
+    fun scan() { busy = true; job = scope.launch { try { groups = withContext(Dispatchers.IO) { runCatching { Junk.scan(ctx) }.getOrElse { e -> msg = "Erro na busca: ${e.message}"; emptyList() } }; sel.clear()
         groups!!.filter { it.label in setOf("Vídeos de status", "Fotos de status", "Miniaturas e caches de mídia", "Arquivos temporários") }.forEach { g -> g.files.forEach { sel[it.path] = true } } } finally { busy = false } } }
+    val tick = rememberResumeTick(); val hasPerm = remember(tick) { android.os.Environment.isExternalStorageManager() }
     val chosen = groups.orEmpty().flatMap { it.files }.filter { sel[it.path] == true }
     val total = chosen.sumOf { if (it.isFile) it.length() else it.walkTopDown().sumOf { f -> f.length() } }
     Scaffold(contentWindowInsets = WindowInsets(0, 0, 0, 0), topBar = { Bar("Buscar lixos inúteis", groups?.let { "${fmtSize(it.sumOf { g -> g.size })} encontrados" }, back) {
-            if (busy) TextButton({ job?.cancel() }) { Text("Cancelar") } else if (groups != null) TextButton({ scan() }) { Text("Analisar de novo") } } },
-        bottomBar = { if (chosen.isNotEmpty()) Row(Modifier.fillMaxWidth().padding(12.dp)) {
+            if (busy) TextButton({ job?.cancel() }) { Text("Cancelar") } } },
+        bottomBar = { if (chosen.isEmpty() && !busy) Button({ msg = null; scan() }, Modifier.fillMaxWidth().padding(12.dp).height(56.dp), enabled = hasPerm) {
+                Icon(Icons.Default.Search, null); Spacer(Modifier.width(8.dp)); Text(if (groups == null) "Buscar" else "Buscar de novo") }
+            if (chosen.isNotEmpty()) Row(Modifier.fillMaxWidth().padding(12.dp)) {
             OutlinedButton({ sel.clear() }, Modifier.height(56.dp)) { Text("Limpar seleção") }; Spacer(Modifier.width(8.dp))
             Button({ ask = true }, Modifier.weight(1f).height(56.dp)) { Icon(Icons.Default.Delete, null); Spacer(Modifier.width(6.dp)); Text("Apagar ${chosen.size} · ${fmtSize(total)}") } } }) { pad ->
         Column(Modifier.padding(pad)) {
             msg?.let { Text(it, Modifier.padding(12.dp), color = MaterialTheme.colorScheme.secondary) }
             when { busy -> Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) { CircularProgressIndicator(); Text("Analisando o armazenamento…", Modifier.padding(12.dp)) }
-                groups == null -> Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-                    EmptyState(Icons.Default.CleaningServices, "Arquivos inúteis", "Status dos outros, ícones, figurinhas, miniaturas e caches. Fotos e vídeos da Câmera/DCIM/Pictures nunca entram. Tudo vai para a Lixeira do app e pode ser restaurado."); Button({ scan() }) { Text("Analisar") } }
-                groups!!.isEmpty() -> EmptyState(Icons.Default.Verified, "Nada para limpar")
+                groups == null -> Column(Modifier.fillMaxSize().verticalScrollCompat(), horizontalAlignment = Alignment.CenterHorizontally) {
+                    EmptyState(Icons.Default.CleaningServices, "Buscar lixos inúteis", "Ícones, vídeos e fotos de status, miniaturas e caches. Fotos e vídeos da Câmera/DCIM/Pictures nunca entram. Tudo vai para a Lixeira do app e pode ser restaurado.", fill = false)
+                    if (!hasPerm) { Text("Falta a permissão \"Acesso a todos os arquivos\".", color = MaterialTheme.colorScheme.error)
+                        Button({ runCatching { ctx.startActivity(android.content.Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, android.net.Uri.parse("package:" + ctx.packageName))) } }, Modifier.padding(12.dp)) { Text("Conceder permissão") } } }
+                groups!!.isEmpty() -> Column(Modifier.fillMaxSize().verticalScrollCompat(), horizontalAlignment = Alignment.CenterHorizontally) { EmptyState(Icons.Default.Verified, "Nada para limpar", "Não encontramos status, ícones, miniaturas nem caches inúteis.", fill = false) }
                 else -> LazyColumn(contentPadding = PaddingValues(12.dp)) { groups!!.forEach { g ->
                     val n = g.files.count { sel[it.path] == true }
                     item(key = "h" + g.label) { ElevatedCard(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {

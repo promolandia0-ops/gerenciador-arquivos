@@ -291,7 +291,8 @@ fun MediaFinderScreen(title: String, intro: String, initial: RecoverScan.Opts, f
     val shown = remember(base.size, type, sort, items.size, origin, dirFilter) { MediaFilter.sort(base.filter { (origin == null || it.cat == origin) && (dirFilter == null || it.path.startsWith("$dirFilter/")) && when (type) { 1 -> it.isMedia && !it.isVideo; 2 -> it.isVideo; 3 -> !it.isMedia; else -> true } }, sort) }
     Scaffold(contentWindowInsets = WindowInsets(0, 0, 0, 0), topBar = { Bar(title, phase ?: "${base.count { it.isMedia && !it.isVideo }} fotos · ${base.count { it.isVideo }} vídeos" + (if (fullOpts) " · acesso: ${Priv.name()}" else ""), back) {
         if (phase != null) TextButton({ job?.cancel() }) { Text("Cancelar") } else IconButton({ optsOpen = true }) { Icon(Icons.Default.Tune, "Opções") } } },
-        bottomBar = { AnimatedVisibility(sel.isNotEmpty(), enter = slideInVertically { it }, exit = slideOutVertically { it }) {
+        bottomBar = { if (items.isEmpty() && phase == null) Button({ start() }, Modifier.fillMaxWidth().padding(12.dp).height(56.dp)) { Icon(Icons.Default.Search, null); Spacer(Modifier.width(8.dp)); Text("Buscar fotos e vídeos") }
+            AnimatedVisibility(sel.isNotEmpty(), enter = slideInVertically { it }, exit = slideOutVertically { it }) {
             Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 OutlinedButton({ sel.clear() }, Modifier.height(56.dp)) { Text("Limpar") }; Spacer(Modifier.width(8.dp))
                 OutlinedButton({ askDel = true }, Modifier.height(56.dp)) { Icon(Icons.Default.Delete, "Apagar") }; Spacer(Modifier.width(8.dp))
@@ -301,10 +302,9 @@ fun MediaFinderScreen(title: String, intro: String, initial: RecoverScan.Opts, f
                 Text("$phase · $count achados", Modifier.padding(horizontal = 12.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis) }
             if (items.isEmpty() && phase == null) {
                 Column(Modifier.fillMaxSize().verticalScrollCompat(), horizontalAlignment = Alignment.CenterHorizontally) {
-                    EmptyState(Icons.Default.PhotoLibrary, title, intro)
+                    EmptyState(Icons.Default.PhotoLibrary, title, intro, fill = false)
                     if (fullOpts) Text(ROOT_NOTE, Modifier.padding(horizontal = 24.dp, vertical = 6.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (fullOpts && !Priv.ok()) Text("Dica: em Ferramentas > Android/data, conceda a permissão de pasta (quando o Android deixar) para incluir Android/data na busca.", Modifier.padding(horizontal = 24.dp), color = MaterialTheme.colorScheme.tertiary)
-                    Button({ start() }, Modifier.padding(16.dp).fillMaxWidth(0.8f).height(56.dp)) { Icon(Icons.Default.Search, null); Spacer(Modifier.width(8.dp)); Text("Buscar fotos e vídeos") }
                     if (done != null) Text(done!!, color = MaterialTheme.colorScheme.secondary)
                 }
                 return@Column
