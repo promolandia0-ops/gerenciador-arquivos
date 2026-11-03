@@ -41,11 +41,13 @@ fun loadRecent(ctx: Context): List<File> { val lim = System.currentTimeMillis() 
     return volumes(ctx).flatMap { v -> walk(v.root, false) { it.lastModified() > lim } }.sortedByDescending { it.lastModified() }.take(300) }
 
 @Composable
-fun HomeScreen(go: (Scr) -> Unit) {
+fun HomeScreen(go: (Scr) -> Unit, resume: (() -> Unit)? = null) {
     val ctx = LocalContext.current
     val vols = remember { volumes(ctx) }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { Text("Arquivos", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.Bold) }
+        (Nav.saved?.lastOrNull() as? Scr.Browse)?.let { last -> if (resume != null) item {
+            AssistChip(resume, { Text("Voltar para ${File(last.dir).name.ifEmpty { "Armazenamento" }}  ·  deslize ←", maxLines = 1) }, leadingIcon = { Icon(Icons.Default.History, null) }) } }
         items(vols) { v -> val (used, total) = remember(v) { stat(v.root) }
             Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(Brush.linearGradient(listOf(Color(0xFF1E3A66), Color(0xFF2B1E4F))))
                 .clickable { go(Scr.Browse(v.root.path)) }.padding(20.dp)) {
@@ -101,6 +103,11 @@ fun BrowserScreen(dir: String, onNavigate: (String) -> Unit, go: (Scr) -> Unit, 
             else sortFiles(d.listFiles().orEmpty().filter { Prefs.showHidden || !it.name.startsWith(".") }, Prefs.sort)
         }
     }
+    val sp = Nav.scroll[dir]
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState(sp?.first ?: 0, sp?.second ?: 0)
+    val gridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState(sp?.first ?: 0, sp?.second ?: 0)
+    DisposableEffect(dir) { onDispose { Nav.scroll[dir] = if (Prefs.grid) gridState.firstVisibleItemIndex to gridState.firstVisibleItemScrollOffset else listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+        ctx.getSharedPreferences("prefs", 0).edit().putString("lastDir", dir).apply() } }
     BackHandlerCompat(sel.isNotEmpty()) { sel.clear() }
     BackHandlerCompat(sel.isEmpty() && d.parentFile != null && volumes(ctx).none { it.root == d }) { onNavigate(d.parent!!) }
     Scaffold(contentWindowInsets = WindowInsets(0, 0, 0, 0), topBar = {
@@ -129,9 +136,9 @@ fun BrowserScreen(dir: String, onNavigate: (String) -> Unit, go: (Scr) -> Unit, 
                     EmptyState(Icons.Default.Lock, "Pasta protegida pelo Android", "Use Shizuku ou permissão SAF para abrir Android/data e obb.")
                     Button({ go(Scr.Data) }) { Text("Abrir com acesso especial") } }
                 l.isEmpty() -> EmptyState(Icons.Default.FolderOpen, if (query.isNotEmpty()) "Nada encontrado" else "Pasta vazia")
-                Prefs.grid -> LazyVerticalGrid(GridCells.Adaptive(108.dp), Modifier.fillMaxSize(), contentPadding = PaddingValues(8.dp)) {
+                Prefs.grid -> LazyVerticalGrid(GridCells.Adaptive(108.dp), Modifier.fillMaxSize(), state = gridState, contentPadding = PaddingValues(8.dp)) {
                     items(l, key = { it.path }) { f -> FileCell(f, f in sel, { if (sel.isNotEmpty()) toggle(sel, f) else if (f.isDirectory) onNavigate(f.path) else openF(f) }) { toggle(sel, f) } } }
-                else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(8.dp)) {
+                else -> LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(8.dp)) {
                     items(l, key = { it.path }) { f -> FileRow(f, f in sel, if (query.isNotEmpty()) f.parent else null, { if (sel.isNotEmpty()) toggle(sel, f) else if (f.isDirectory) onNavigate(f.path) else openF(f) }) { toggle(sel, f) } } }
             }
         }

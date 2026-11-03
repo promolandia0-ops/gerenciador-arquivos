@@ -1,5 +1,8 @@
 package br.geracaoai.arquivos
 
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import java.io.File
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -37,7 +40,12 @@ val Light = lightColorScheme(primary = Color(0xFF2F5FA8), secondary = Color(0xFF
     background = Color(0xFFF7F8FB), surface = Color(0xFFFFFFFF), surfaceVariant = Color(0xFFE9EDF5), surfaceContainer = Color(0xFFEFF2F8),
     primaryContainer = Color(0xFFD6E3FF), onPrimaryContainer = Color(0xFF0B2A5B))
 
-object Nav { var progress by mutableFloatStateOf(0f) }
+object Nav { var progress by mutableFloatStateOf(0f)
+    /** Posição de rolagem por pasta (índice, offset). */
+    val scroll = HashMap<String, Pair<Int, Int>>()
+    /** Pilha salva ao pular de uma pasta para o Início (para voltar com um gesto). */
+    var saved by mutableStateOf<List<Scr>?>(null)
+    var swipeDx by mutableFloatStateOf(0f) }
 @OptIn(ExperimentalSharedTransitionApi::class)
 val LocalSTS = staticCompositionLocalOf<SharedTransitionScope?> { null }
 val LocalAVS = compositionLocalOf<AnimatedVisibilityScope?> { null }
@@ -93,6 +101,11 @@ fun Root(act: FragmentActivity) {
     fun go(s: Scr) { stack.add(s) }
     fun tab(s: Scr) { stack.clear(); stack.add(s) }
     BackHandlerCompat(stack.size > 1) { stack.removeAt(stack.lastIndex) }
+    LaunchedEffect(Unit) { if (Nav.saved == null) ctx.getSharedPreferences("prefs", 0).getString("lastDir", null)?.takeIf { File(it).isDirectory }?.let { Nav.saved = listOf(Scr.Home, Scr.Browse(it)) } }
+    fun jumpHome() { Nav.saved = stack.toList(); (stack.last() as? Scr.Browse)?.let { ctx.getSharedPreferences("prefs", 0).edit().putString("lastDir", it.dir).apply() }
+        stack.clear(); stack.add(Scr.Home) }
+    fun restore() { val sv = Nav.saved ?: return; stack.clear(); stack.addAll(sv) }
+    val density = androidx.compose.ui.platform.LocalDensity.current; val trigger = with(density) { 96.dp.toPx() }
     val tabs = listOf(Triple(Scr.Home, "Início", Icons.Default.Home), Triple(Scr.Dups, "Duplicados", Icons.Default.VideoLibrary),
         Triple(Scr.Apps, "Apps", Icons.Default.Apps), Triple(Scr.Tools, "Ferramentas", Icons.Default.Build))
     var settings by remember { mutableStateOf(false) }
@@ -103,15 +116,34 @@ fun Root(act: FragmentActivity) {
         }
     }) { pad ->
         if (settings) SettingsSheet { settings = false }
-        Box(Modifier.padding(pad).graphicsLayer { val p = Nav.progress; scaleX = 1f - 0.08f * p; scaleY = 1f - 0.08f * p; alpha = 1f - 0.3f * p
+        Box(Modifier.padding(pad).pointerInput(cur is Scr.Browse, cur == Scr.Home && Nav.saved != null) {
+            val inBrowse = cur is Scr.Browse; val atHome = cur == Scr.Home && Nav.saved != null
+            if (!inBrowse && !atHome) return@pointerInput
+            var acc = 0f
+            detectHorizontalDragGestures(onDragStart = { acc = 0f }, onDragCancel = { Nav.swipeDx = 0f },
+                onDragEnd = { if (inBrowse && acc > trigger) jumpHome() else if (atHome && acc < -trigger) restore(); Nav.swipeDx = 0f }) { _, dx ->
+                acc += dx; Nav.swipeDx = if (inBrowse) acc.coerceAtLeast(0f) else acc.coerceAtMost(0f) }
+        }.graphicsLayer { translationX = Nav.swipeDx * 0.35f
+             val p = Nav.progress; scaleX = 1f - 0.08f * p; scaleY = 1f - 0.08f * p; alpha = 1f - 0.3f * p
             shape = RoundedCornerShape((32 * p).dp); clip = p > 0f }) {
          SharedTransitionLayout {
           AnimatedContent(cur, transitionSpec = {
-              (fadeIn(tween(220)) + scaleIn(tween(260), initialScale = 0.94f)) togetherWith (fadeOut(tween(160)) + scaleOut(tween(200), targetScale = 1.03f))
+              val a = initialState; val b = targetState
+              val ease = androidx.compose.animation.core.FastOutSlowInEasing
+              fun fwd() = (slideInHorizontally(tween(320, easing = ease)) { it / 3 } + fadeIn(tween(240)) + scaleIn(tween(320, easing = ease), initialScale = 0.96f)) togetherWith
+                  (slideOutHorizontally(tween(320, easing = ease)) { -it / 5 } + fadeOut(tween(200)))
+              fun bwd() = (slideInHorizontally(tween(320, easing = ease)) { -it / 5 } + fadeIn(tween(260))) togetherWith
+                  (slideOutHorizontally(tween(300, easing = ease)) { it / 3 } + fadeOut(tween(220)) + scaleOut(tween(300), targetScale = 0.96f))
+              when {
+                  a is Scr.Browse && b is Scr.Browse -> if (b.dir.startsWith(a.dir + "/")) fwd() else bwd()
+                  a == Scr.Home && b is Scr.Browse -> fwd()
+                  a is Scr.Browse && b == Scr.Home -> bwd()
+                  else -> (fadeIn(tween(220)) + scaleIn(tween(260), initialScale = 0.94f)) togetherWith (fadeOut(tween(160)) + scaleOut(tween(200), targetScale = 1.03f))
+              }
           }, contentKey = { if (it is Scr.Browse) "b" + it.dir else it.toString() }, label = "nav") { cur ->
            CompositionLocalProvider(LocalSTS provides this@SharedTransitionLayout, LocalAVS provides this@AnimatedContent) {
             when (cur) {
-                Scr.Home -> HomeScreen(::go)
+                Scr.Home -> HomeScreen(::go, if (Nav.saved != null) ({ restore() }) else null)
                 is Scr.Browse -> BrowserScreen(cur.dir, onNavigate = { stack[stack.lastIndex] = Scr.Browse(it) }, go = ::go, back = { stack.removeAt(stack.lastIndex) })
                 is Scr.Category -> FileListScreen(cur.cat.label, { loadCategory(ctx, cur.cat) }, ::go) { stack.removeAt(stack.lastIndex) }
                 Scr.Recent -> FileListScreen("Recentes", { loadRecent(ctx) }, ::go) { stack.removeAt(stack.lastIndex) }

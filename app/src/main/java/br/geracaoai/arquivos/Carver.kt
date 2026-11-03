@@ -24,14 +24,15 @@ object Carver {
             ascii(b, 0, 4) == "GIF8" -> "gif"
             ascii(b, 0, 4) == "RIFF" && ascii(b, 8, 4) == "WEBP" -> "webp"
             ascii(b, 4, 4) == "ftyp" -> when (ascii(b, 8, 4)) { "heic", "heix", "mif1", "msf1" -> "heic"; "qt  " -> "mov"; "3gp4", "3gp5", "3gp6" -> "3gp"; "M4A " -> "m4a"; else -> "mp4" }
-            u(0) == 0x1A && u(1) == 0x45 && u(2) == 0xDF && u(3) == 0xA3 -> "mkv"
+            ascii(b, 0, 4) == "RIFF" && ascii(b, 8, 4) == "AVI " -> "avi"
+            u(0) == 0x1A && u(1) == 0x45 && u(2) == 0xDF && u(3) == 0xA3 -> if (String(h, Charsets.ISO_8859_1).contains("webm")) "webm" else "mkv"
             ascii(b, 0, 3) == "ID3" -> "mp3"
             ascii(b, 0, 4) == "OggS" -> "ogg"
             ascii(b, 0, 4) == "%PDF" -> "pdf"
             else -> null
         }
     }
-    fun sniff(f: File): String? = runCatching { RandomAccessFile(f, "r").use { r -> val h = ByteArray(16); val n = r.read(h); if (n < 12) null else sniff(h) } }.getOrNull()
+    fun sniff(f: File): String? = runCatching { RandomAccessFile(f, "r").use { r -> val h = ByteArray(64); val n = r.read(h); if (n < 12) null else sniff(h.copyOf(n)) } }.getOrNull()
 
     private fun jpegEnd(b: ByteBuffer, s: Long, lim: Long): Long {
         var i = s + 2

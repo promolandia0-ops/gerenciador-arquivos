@@ -4,6 +4,8 @@ import android.content.ContentResolver
 import android.content.Context
 import android.os.Bundle
 import android.provider.MediaStore
+import android.provider.DocumentsContract
+import android.os.Build
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -37,8 +39,15 @@ enum class RCat(val label: String) { LIXEIRA("Lixeiras"), CACHE("Caches de apps"
     RENOMEADO("Extensão trocada"), OCULTO("Mídia oculta/.nomedia"), ORFAO("Apps desinstalados"), ANTIGO("Arquivos antigos"),
     PENDENTE("Pendentes/incompletos"), APPDADOS("Pastas de apps"), BACKUP("Backups") }
 
+/** Pasta oculta encontrada (nome com ponto ou com .nomedia). */
+data class HiddenDir(val path: String, var files: Int = 0, var bytes: Long = 0, var media: Int = 0)
+/** Local que o Android não deixou ler (sem root). */
+data class Blocked(val path: String, val why: String)
+
+const val RECOVER_DIR = "MeuDrive/Recuperados"
+
 /** Um achado. Se carved != null, é um trecho dentro de [path]. Se priv, o caminho só é legível via Shizuku/root. */
-data class RItem(val cat: RCat, val path: String, val size: Long, val modified: Long, val type: String?, val carved: Carver.Carved? = null, val priv: Boolean = false, val isDir: Boolean = false, val tiny: Boolean = false) {
+data class RItem(val cat: RCat, val path: String, val size: Long, val modified: Long, val type: String?, val carved: Carver.Carved? = null, val priv: Boolean = false, val isDir: Boolean = false, val tiny: Boolean = false, val uri: String? = null) {
     val key get() = path + "#" + (carved?.offset ?: -1)
     val name get() = path.substringAfterLast('/') + (carved?.let { " @${it.offset}" } ?: "")
     val isMedia get() = MediaFilter.isMediaType(type)
@@ -95,7 +104,16 @@ object RecoverScan {
                     val hidden: Boolean = true, val orphans: Boolean = true, val old: Boolean = true, val oldDays: Int = 365, val includeGallery: Boolean = false,
                     val others: Boolean = false, val mstore: Boolean = true, val deepApps: Boolean = true, val backups: Boolean = true)
 
-    suspend fun scan(ctx: Context, o: Opts, phase: (String) -> Unit, found: (RItem) -> Unit) = coroutineScope {
+    suspend fun scan(ctx: Context, o: Opts, phase: (String) -> Unit, hiddenDirs: (List<HiddenDir>) -> Unit = {}, blocked: (Blocked) -> Unit = {}, found: (RItem) -> Unit) = coroutineScope {
+        val hd = LinkedHashMap<String, HiddenDir>(); val nomediaCache = HashMap<String, Boolean>()
+        fun hiddenDirOf(f: File): String? { // pasta oculta mais próxima (com ponto no nome ou contendo .nomedia)
+            var d = f.parentFile
+            while (d != null && d.path.length > root.length) {
+                if (d.name.startsWith(".") || nomediaCache.getOrPut(d.path) { File(d, ".nomedia").exists() }) return d.path
+                d = d.parentFile }
+            return null }
+        fun countHidden(f: File, t: String?) { val d = hiddenDirOf(f) ?: return; val h = hd.getOrPut(d) { HiddenDir(d) }
+            h.files++; h.bytes += f.length(); if (MediaFilter.isMediaType(t)) h.media++ }
         val seen = HashSet<String>()
         fun dims(i: RItem): RItem { if (i.isVideo || !i.isMedia) return i
             var w = 0; var h = 0
@@ -113,7 +131,7 @@ object RecoverScan {
             found(dims(i0)) }
         val tmp = File(ctx.externalCacheDir, "scan_tmp").apply { deleteRecursively(); mkdirs() }
         val priv = Priv.ok()
-        val excl = listOf("$root/.LixeiraGerenciador", "$root/Recuperados", "$root/Android/data", "$root/Android/obb")
+        val excl = listOf("$root/.LixeiraGerenciador", "$root/Recuperados", "$root/$RECOVER_DIR", "$root/Android/data", "$root/Android/obb")
         fun publicFiles(dir: File): Sequence<File> = dir.walkTopDown().onEnter { d -> excl.none { d.path == it } }.filter { it.isFile }
         fun carveInto(f: File, cat: RCat, displayPath: String = f.path, isPriv: Boolean = false) {
             if (!o.carve) return
@@ -168,7 +186,8 @@ object RecoverScan {
         if (o.magic || o.hidden || o.old) { phase("Varredura profunda de todo o armazenamento e cartão SD…")
             val lim = System.currentTimeMillis() - o.oldDays * 86400000L
             volumes(ctx).forEach { v -> publicFiles(v.root).forEach { f -> ensureActive()
-                val hidden = isHiddenPath(f)
+                val hidden = hiddenDirOf(f) != null || f.path.removePrefix(v.root.path).split('/').dropLast(1).any { it.startsWith(".") }
+                if (hidden) countHidden(f, if (f.ext in MEDIA) f.ext else null)
                 if (o.magic && f.ext !in MEDIA && f.length() >= 4096 && f.ext !in setOf("apk", "zip", "pdf", "mp3", "m4a", "ogg", "opus", "jar", "db", "json", "txt")) {
                     Carver.sniff(f)?.takeIf { it != "pdf" && it != "mp3" && it != "ogg" && it != "m4a" }?.let { add(RItem(RCat.RENOMEADO, f.path, f.length(), f.lastModified(), it)) } }
                 if (o.hidden && hidden) { if (f.ext in MEDIA) add(RItem(RCat.OCULTO, f.path, f.length(), f.lastModified(), f.ext))
@@ -176,6 +195,28 @@ object RecoverScan {
                 if (o.carve && f.ext !in MEDIA && MediaFilter.isBlobLike(f.path, f.length())) carveInto(f, if (f.path.lowercase().let { "backup" in it || "smartswitch" in it || it.endsWith(".bak") }) RCat.BACKUP else RCat.EXTRAIDO)
                 if (o.old && f.lastModified() < lim && f.length() >= 100 * 1024 && (o.includeGallery || !isGalleryMedia(f))) add(RItem(RCat.ANTIGO, f.path, f.length(), f.lastModified(), f.ext))
             } }
+            hiddenDirs(hd.values.sortedByDescending { it.bytes }.map { it.copy() })
+        }
+        if (o.deepApps && !priv) { phase("Android/data e obb (acesso direto / permissão de pasta)…")
+            listOf("data", "obb").forEach { s -> val d = File(primaryRoot, "Android/$s"); val kids = d.listFiles()
+                if (!kids.isNullOrEmpty()) kids.filter { it.isDirectory && it.name != ctx.packageName }.forEach { k -> runCatching { k.walkTopDown().filter { it.isFile }.forEach { f -> ensureActive()
+                        val t = if (f.ext in MEDIA) f.ext else if (f.length() >= 2048) Carver.sniff(f) else null
+                        if (t != null) add(RItem(if ("cache" in f.path) RCat.CACHE else RCat.APPDADOS, f.path, f.length(), f.lastModified(), t)) } } }
+                else if (s == "data" || d.exists()) {
+                    val trees = Saf.granted(ctx).filter { DocumentsContract.getTreeDocumentId(it).startsWith("primary:Android/$s") }
+                    var any = false
+                    trees.forEach { tree -> val top = DocumentsContract.getTreeDocumentId(tree)
+                        fun walk(id: String, depth: Int) { if (depth > 24) return
+                            Saf.list(ctx, tree, id).forEach { doc -> ensureActive(); any = true
+                                if (doc.isDir) walk(doc.id, depth + 1) else if (doc.size >= 2048) {
+                                    val u = DocumentsContract.buildDocumentUriUsingTree(tree, doc.id)
+                                    val ext = doc.name.substringAfterLast('.', "").lowercase()
+                                    val t = if (ext in MEDIA) ext else runCatching { ctx.contentResolver.openInputStream(u)?.use { i -> val h = ByteArray(64); val n = i.read(h); if (n >= 12) Carver.sniff(h.copyOf(n)) else null } }.getOrNull()
+                                    if (t != null) add(RItem(if ("/cache" in doc.id) RCat.CACHE else RCat.APPDADOS, "$root/" + doc.id.substringAfter(':'), doc.size, doc.modified, t, uri = u.toString())) } } }
+                        walk(top, 0) }
+                    if (!any) blocked(Blocked("Android/$s", if (sdkInt() >= 33) "Bloqueado pelo Android ${Build.VERSION.RELEASE} sem root (nem com permissão de pasta)" else "Conceda a permissão da pasta em Ferramentas > Android/data"))
+                }
+            }
         }
         if (o.orphans) { phase("Pastas de apps desinstalados…")
             val pm = ctx.packageManager; val installed = pm.getInstalledApplications(0).map { it.packageName }.toSet()
@@ -189,17 +230,20 @@ object RecoverScan {
                     val t = runCatching { Carver.sniff(Priv.hexToBytes(pf.head)) }.getOrNull() ?: pf.path.substringAfterLast('.', "").lowercase().ifEmpty { null }
                     add(RItem(RCat.ORFAO, pf.path, pf.size, pf.modified, t, priv = true)) } } }
         }
+        if (sdkInt() >= 30 && !(Prefs.root && Root.available())) blocked(Blocked("/data/data (dados internos dos apps)", "Só com root — inclui fotos de visualização única e caches internos"))
         phase("Concluído")
     }
 
     /** Recupera (copia) para /Recuperados/<categoria>. Nunca altera a origem. */
     fun recover(ctx: Context, i: RItem): File {
-        val dir = File(primaryRoot, "Recuperados/${i.cat.label}").apply { mkdirs() }
+        val dir = File(primaryRoot, "$RECOVER_DIR/${i.cat.label}").apply { mkdirs() }
         val base = i.path.substringAfterLast('/').removePrefix(".trashed-").let { if (i.carved != null) it.substringBeforeLast('.') + "_" + i.carved.offset else it }
         val nm = if (i.type != null && !base.lowercase().endsWith("." + i.type) && !i.isDir) "$base.${i.type}" else base
         val dst = FileOps.uniqueTarget(dir, nm)
         when {
             i.carved != null -> Carver.extract(File(i.path), i.carved, dst)
+            i.uri != null -> { val tmp = File(dir, ".${dst.name}.part"); try { ctx.contentResolver.openInputStream(android.net.Uri.parse(i.uri))!!.use { inp -> tmp.outputStream().use { inp.copyTo(it) } }
+                if (!tmp.renameTo(dst)) error("falha") } catch (e: Exception) { tmp.delete(); throw e } }
             i.priv -> { val tmp = File(dir, ".${dst.name}.part"); if (!Priv.exec("cp -rp ${Shz.q(i.path)} ${Shz.q(tmp.path)}").let { it.first == 0 } || !tmp.renameTo(dst)) { tmp.deleteRecursively(); error("falha") } }
             else -> SafeOps.copyVerified(File(i.path), dst)
         }
@@ -211,10 +255,10 @@ object RecoverScan {
 /** Arquivo local legível para visualizar (cópia em cache para itens privados/extraídos). Nunca altera a origem. */
 suspend fun previewFile(ctx: Context, i: RItem): File? = withContext(Dispatchers.IO) { runCatching {
     when {
-        i.carved == null && !i.priv -> File(i.path)
+        i.carved == null && !i.priv && i.uri == null -> File(i.path)
         else -> { val d = File(ctx.externalCacheDir, "preview").apply { mkdirs() }
             val f = File(d, i.key.hashCode().toUInt().toString() + "." + (i.type ?: "bin"))
-            if (!f.exists() || f.length() == 0L) { if (i.carved != null) Carver.extract(File(i.path), i.carved, f) else if (!Priv.copy(i.path, f.path)) error("x") }
+            if (!f.exists() || f.length() == 0L) { if (i.carved != null) Carver.extract(File(i.path), i.carved, f) else if (i.uri != null) ctx.contentResolver.openInputStream(android.net.Uri.parse(i.uri))!!.use { inp -> f.outputStream().use { inp.copyTo(it) } } else if (!Priv.copy(i.path, f.path)) error("x") }
             f }
     } }.getOrNull() }
 
@@ -228,25 +272,38 @@ fun MediaFinderScreen(title: String, intro: String, initial: RecoverScan.Opts, f
     var type by remember { mutableIntStateOf(0) }; var sort by remember { mutableIntStateOf(0) }
     val sel = remember { mutableStateListOf<String>() }; var ask by remember { mutableStateOf(false) }; var done by remember { mutableStateOf<String?>(null) }; var optsOpen by remember { mutableStateOf(false) }
     var view by remember { mutableStateOf<RItem?>(null) }
-    fun start() { items.clear(); sel.clear(); done = null; job = scope.launch(Dispatchers.IO) {
-        try { RecoverScan.scan(ctx, opts, { phase = it }) { i -> scope.launch(Dispatchers.Main) { items.add(i) } } } catch (_: CancellationException) {} finally { phase = null } } }
+    val hiddenDirs = remember { mutableStateListOf<HiddenDir>() }; val blocked = remember { mutableStateListOf<Blocked>() }
+    var origin by remember { mutableStateOf<RCat?>(null) }; var showHidden by remember { mutableStateOf(false) }; var askDel by remember { mutableStateOf(false) }
+    var dirFilter by remember { mutableStateOf<String?>(null) }; var count by remember { mutableIntStateOf(0) }
+    fun start() { items.clear(); sel.clear(); hiddenDirs.clear(); blocked.clear(); origin = null; dirFilter = null; showHidden = false; done = null; count = 0; job = scope.launch(Dispatchers.IO) {
+        try { RecoverScan.scan(ctx, opts, { phase = it }, { l -> scope.launch(Dispatchers.Main) { hiddenDirs.clear(); hiddenDirs.addAll(l) } }, { b -> scope.launch(Dispatchers.Main) { if (blocked.none { it.path == b.path }) blocked.add(b) } }) { i -> count++; scope.launch(Dispatchers.Main) { items.add(i) } } } catch (_: CancellationException) {} finally { phase = null } } }
     fun recover(list: List<RItem>) = scope.launch { var ok = 0; var fail = 0; withContext(Dispatchers.IO) { list.forEach { runCatching { RecoverScan.recover(ctx, it) }.onSuccess { ok++ }.onFailure { fail++ } } }
-        sel.clear(); done = "✓ $ok recuperado(s) em /Recuperados" + if (fail > 0) " · $fail falharam" else ""; toast(ctx, done!!) }
+        sel.clear(); done = "✓ $ok recuperado(s) em /$RECOVER_DIR" + if (fail > 0) " · $fail falharam" else ""; toast(ctx, done!!) }
+    fun delete(list: List<RItem>) = scope.launch { var ok = 0; var skip = 0; withContext(Dispatchers.IO) { list.forEach { i ->
+            val r = when { i.carved != null || i.priv -> null
+                i.uri != null -> runCatching { DocumentsContract.deleteDocument(ctx.contentResolver, android.net.Uri.parse(i.uri)) }.getOrDefault(false)
+                else -> Trash.moveToTrash(ctx, File(i.path)) }
+            if (r == true) ok++ else skip++ } }
+        val gone = list.map { it.key }.toSet(); items.removeAll { it.key in gone && (it.carved == null && !it.priv) }; sel.clear()
+        done = "🗑 $ok movido(s) para a Lixeira do app" + if (skip > 0) " · $skip não podem ser apagados (extraídos/protegidos)" else ""; toast(ctx, done!!) }
     val base = items.filter { MediaFilter.keep(it, opts.others, tiny) }
-    val shown = remember(base.size, type, sort, items.size) { MediaFilter.sort(base.filter { when (type) { 1 -> it.isMedia && !it.isVideo; 2 -> it.isVideo; 3 -> !it.isMedia; else -> true } }, sort) }
+    val cats = remember(base.size) { base.groupingBy { it.cat }.eachCount() }
+    val shown = remember(base.size, type, sort, items.size, origin, dirFilter) { MediaFilter.sort(base.filter { (origin == null || it.cat == origin) && (dirFilter == null || it.path.startsWith("$dirFilter/")) && when (type) { 1 -> it.isMedia && !it.isVideo; 2 -> it.isVideo; 3 -> !it.isMedia; else -> true } }, sort) }
     Scaffold(contentWindowInsets = WindowInsets(0, 0, 0, 0), topBar = { Bar(title, phase ?: "${base.count { it.isMedia && !it.isVideo }} fotos · ${base.count { it.isVideo }} vídeos" + (if (fullOpts) " · acesso: ${Priv.name()}" else ""), back) {
         if (phase != null) TextButton({ job?.cancel() }) { Text("Cancelar") } else IconButton({ optsOpen = true }) { Icon(Icons.Default.Tune, "Opções") } } },
         bottomBar = { AnimatedVisibility(sel.isNotEmpty(), enter = slideInVertically { it }, exit = slideOutVertically { it }) {
             Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 OutlinedButton({ sel.clear() }, Modifier.height(56.dp)) { Text("Limpar") }; Spacer(Modifier.width(8.dp))
+                OutlinedButton({ askDel = true }, Modifier.height(56.dp)) { Icon(Icons.Default.Delete, "Apagar") }; Spacer(Modifier.width(8.dp))
                 Button({ ask = true }, Modifier.weight(1f).height(56.dp)) { Icon(Icons.Default.SettingsBackupRestore, null); Spacer(Modifier.width(8.dp)); Text("Recuperar ${sel.size}") } } } }) { pad ->
         Column(Modifier.padding(pad)) {
-            if (phase != null) LinearProgressIndicator(Modifier.fillMaxWidth())
+            if (phase != null) { LinearProgressIndicator(Modifier.fillMaxWidth())
+                Text("$phase · $count achados", Modifier.padding(horizontal = 12.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis) }
             if (items.isEmpty() && phase == null) {
                 Column(Modifier.fillMaxSize().verticalScrollCompat(), horizontalAlignment = Alignment.CenterHorizontally) {
                     EmptyState(Icons.Default.PhotoLibrary, title, intro)
                     if (fullOpts) Text(ROOT_NOTE, Modifier.padding(horizontal = 24.dp, vertical = 6.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (fullOpts && !Priv.ok()) Text("Dica: ative o Shizuku (Ferramentas > Android/data) para buscar também dentro de Android/data.", Modifier.padding(horizontal = 24.dp), color = MaterialTheme.colorScheme.tertiary)
+                    if (fullOpts && !Priv.ok()) Text("Dica: em Ferramentas > Android/data, conceda a permissão de pasta (quando o Android deixar) para incluir Android/data na busca.", Modifier.padding(horizontal = 24.dp), color = MaterialTheme.colorScheme.tertiary)
                     Button({ start() }, Modifier.padding(16.dp).fillMaxWidth(0.8f).height(56.dp)) { Icon(Icons.Default.Search, null); Spacer(Modifier.width(8.dp)); Text("Buscar fotos e vídeos") }
                     if (done != null) Text(done!!, color = MaterialTheme.colorScheme.secondary)
                 }
@@ -257,8 +314,21 @@ fun MediaFinderScreen(title: String, intro: String, initial: RecoverScan.Opts, f
                 item { FilterChip(type == 2, { type = 2 }, { Text("Vídeos") }, leadingIcon = { Icon(Icons.Default.Movie, null, Modifier.size(18.dp)) }) }
                 item { FilterChip(type == 0, { type = 0 }, { Text("Tudo") }) }
                 if (opts.others) item { FilterChip(type == 3, { type = 3 }, { Text("Outros") }) }
+                item { FilterChip(showHidden, { showHidden = !showHidden }, { Text("Pastas ocultas (${hiddenDirs.size})") }, leadingIcon = { Icon(Icons.Default.VisibilityOff, null, Modifier.size(18.dp)) }) }
                 item { VerticalDivider(Modifier.height(32.dp).padding(horizontal = 4.dp)) }
                 items(listOf("Esquecidos", "Recentes", "Antigos", "Maiores", "Menores").withIndex().toList()) { (i, s) -> FilterChip(sort == i, { sort = i }, { Text(s) }) } }
+            LazyRow(contentPadding = PaddingValues(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                item { FilterChip(origin == null, { origin = null }, { Text("Todas as origens") }) }
+                items(cats.entries.sortedByDescending { it.value }.toList()) { (c, n) -> FilterChip(origin == c, { origin = if (origin == c) null else c }, { Text("${c.label} ($n)") }) } }
+            if (blocked.isNotEmpty()) Column(Modifier.padding(horizontal = 12.dp, vertical = 2.dp)) { blocked.forEach { b ->
+                Text("🔒 ${b.path}: ${b.why}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary) } }
+            dirFilter?.let { d -> AssistChip({ dirFilter = null }, { Text("Pasta: " + d.removePrefix(primaryRoot.path) + "  ✕", maxLines = 1, overflow = TextOverflow.Ellipsis) }, Modifier.padding(horizontal = 12.dp)) }
+            if (showHidden) { LazyColumn(Modifier.fillMaxSize()) {
+                item { Text("${hiddenDirs.size} pastas ocultas · ${hiddenDirs.sumOf { it.files }} arquivos · ${fmtSize(hiddenDirs.sumOf { it.bytes })}", Modifier.padding(12.dp), style = MaterialTheme.typography.titleSmall) }
+                items(hiddenDirs.toList(), key = { it.path }) { h -> ListItem(headlineContent = { Text(h.path.removePrefix(primaryRoot.path).ifEmpty { "/" }, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+                    supportingContent = { Text("${h.files} arquivos · ${h.media} fotos/vídeos · ${fmtSize(h.bytes)}") }, leadingContent = { Icon(Icons.Default.FolderOff, null, tint = MaterialTheme.colorScheme.primary) },
+                    modifier = Modifier.clickable { dirFilter = h.path; showHidden = false }) } }
+                return@Column }
             Row(Modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("${shown.size} itens · ${fmtSize(shown.sumOf { it.size })}", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
                 TextButton({ sel.clear(); sel.addAll(shown.map { it.key }) }) { Text("Selecionar todos") }
@@ -268,7 +338,8 @@ fun MediaFinderScreen(title: String, intro: String, initial: RecoverScan.Opts, f
                 MediaCell(i, i.key in sel, onClick = { if (sel.isNotEmpty()) { if (i.key in sel) sel.remove(i.key) else sel.add(i.key) } else view = i }) { if (i.key in sel) sel.remove(i.key) else sel.add(i.key) } } }
         }
     }
-    if (ask) Confirm("Recuperar ${sel.size} item(ns)?", "Serão COPIADOS para /Recuperados/<categoria>. Os originais não são alterados.", "Recuperar", onDismiss = { ask = false }) { recover(items.filter { it.key in sel }) }
+    if (ask) Confirm("Recuperar ${sel.size} item(ns)?", "Serão COPIADOS para /$RECOVER_DIR/<categoria> com a extensão correta. Os originais não são alterados.", "Recuperar", onDismiss = { ask = false }) { recover(items.filter { it.key in sel }) }
+    if (askDel) Confirm("Apagar ${sel.size} item(ns)?", "Arquivos comuns vão para a Lixeira do app (dá para restaurar). Itens extraídos de blobs ou protegidos não são apagados.", "Apagar", danger = true, onDismiss = { askDel = false }) { askDel = false; delete(items.filter { it.key in sel }) }
     view?.let { v -> MediaViewer(v, { view = null }) { recover(listOf(v)); view = null } }
     if (optsOpen) AlertDialog({ optsOpen = false }, confirmButton = { TextButton({ optsOpen = false }) { Text("OK") } }, title = { Text("Opções") }, text = { Column(Modifier.verticalScrollCompat()) {
         @Composable fun sw(l: String, v: Boolean, f: (Boolean) -> Unit) = Row(verticalAlignment = Alignment.CenterVertically) { Text(l, Modifier.weight(1f)); Switch(v, f) }
@@ -278,7 +349,7 @@ fun MediaFinderScreen(title: String, intro: String, initial: RecoverScan.Opts, f
             sw("Lixeiras", opts.trash) { opts = opts.copy(trash = it) }; sw("Caches de apps", opts.caches) { opts = opts.copy(caches = it) }
             sw("Miniaturas", opts.thumbs) { opts = opts.copy(thumbs = it) }; sw("Extrair de blobs (carving)", opts.carve) { opts = opts.copy(carve = it) }
             sw("Extensão trocada", opts.magic) { opts = opts.copy(magic = it) }; sw("Mídia oculta/.nomedia", opts.hidden) { opts = opts.copy(hidden = it) }
-            sw("MediaStore (lixeira/pendentes)", opts.mstore) { opts = opts.copy(mstore = it) }; sw("Todas as pastas de apps (Shizuku/root)", opts.deepApps) { opts = opts.copy(deepApps = it) }
+            sw("MediaStore (lixeira/pendentes)", opts.mstore) { opts = opts.copy(mstore = it) }; sw("Pastas de apps (Android/data, obb)", opts.deepApps) { opts = opts.copy(deepApps = it) }
             sw("Apps desinstalados", opts.orphans) { opts = opts.copy(orphans = it) }; sw("Arquivos antigos (> 1 ano)", opts.old) { opts = opts.copy(old = it) }
             sw("Incluir mídia normal da galeria", opts.includeGallery) { opts = opts.copy(includeGallery = it) }
             sw("Modo root (se o aparelho tiver root)", Prefs.root) { Prefs.root = it; Prefs.save(ctx) } }
@@ -292,10 +363,11 @@ fun MediaCell(i: RItem, selected: Boolean, onClick: () -> Unit, onLong: () -> Un
     val model by produceState<Any?>(null, i.key) { value = when {
         !i.isMedia -> null
         i.carved != null && !i.isVideo && i.carved.length < (8 shl 20) -> withContext(Dispatchers.IO) { runCatching { Carver.readRange(File(i.path), i.carved) }.getOrNull() }
+        i.uri != null -> android.net.Uri.parse(i.uri)
         !i.priv && i.carved == null -> File(i.path)
         i.size < (60L shl 20) -> previewFile(ctx, i)
         else -> null } }
-    val dur by produceState(0L, i.key) { if (i.isVideo && !i.priv && i.carved == null) value = withContext(Dispatchers.IO) { runCatching {
+    val dur by produceState(0L, i.key) { if (i.isVideo && !i.priv && i.carved == null && i.uri == null) value = withContext(Dispatchers.IO) { runCatching {
         android.media.MediaMetadataRetriever().run { try { setDataSource(i.path); extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLong() ?: 0L } finally { release() } } }.getOrDefault(0L) } }
     Column(Modifier.padding(3.dp).clip(RoundedCornerShape(12.dp)).combinedClickable(onClick = onClick, onLongClick = onLong)) {
         Box(Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
