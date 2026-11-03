@@ -49,7 +49,14 @@ object Nav { var progress by mutableFloatStateOf(0f)
     val tabs = mutableStateListOf<String>()
     val listCache = HashMap<String, List<java.io.File>>()
     var swipeDx by mutableFloatStateOf(0f)
-    fun load(ctx: android.content.Context) { if (tabs.isEmpty()) tabs.addAll(Tabs.decode(ctx.getSharedPreferences("prefs", 0).getString("tabs", null) ?: ctx.getSharedPreferences("prefs", 0).getString("lastDir", null)).filter { java.io.File(it).isDirectory }) }
+    /** Só para testes. */
+    var permOverride: Boolean? = null
+    fun load(ctx: android.content.Context) { if (tabs.isNotEmpty()) return
+        val p = ctx.getSharedPreferences("prefs", 0)
+        val raw = runCatching { p.getString("tabs", null) ?: p.getString("lastDir", null) }.getOrNull()
+        val l = runCatching { Tabs.decode(raw).filter { runCatching { java.io.File(it).isDirectory }.getOrDefault(false) }.distinct() }.getOrDefault(emptyList())
+        if (l.isEmpty() && raw != null) runCatching { p.edit().remove("tabs").apply() }
+        tabs.addAll(l) }
     fun save(ctx: android.content.Context) = ctx.getSharedPreferences("prefs", 0).edit().putString("tabs", Tabs.encode(tabs)).apply()
     fun set(ctx: android.content.Context, n: List<String>) { if (n != tabs.toList()) { tabs.clear(); tabs.addAll(n) }; save(ctx) }
     /** Definido pela tela raiz: abre uma pasta numa aba (usado por "Abrir pasta"). */
@@ -69,7 +76,8 @@ object Tabs {
     /** Página do pager a mostrar após fechar a aba i estando na página [page] (0 = Início). */
     fun pageAfterClose(page: Int, i: Int, newSize: Int) = (if (page - 1 > i) page - 1 else if (page - 1 == i) minOf(page, newSize) else page).coerceIn(0, newSize)
     fun encode(l: List<String>) = l.joinToString("\n")
-    fun decode(s: String?) = s.orEmpty().split('\n').filter { it.isNotBlank() }.take(MAX)
+    /** Tolerante: aceita v1.6 (lista com \n), v1.5 (um caminho só) e ignora lixo. */
+    fun decode(s: String?): List<String> = runCatching { s.orEmpty().split('\n', '\r').map { it.trim() }.filter { it.startsWith("/") }.distinct().take(MAX) }.getOrDefault(emptyList())
 }
 @OptIn(ExperimentalSharedTransitionApi::class)
 val LocalSTS = staticCompositionLocalOf<SharedTransitionScope?> { null }
@@ -109,7 +117,7 @@ fun rememberResumeTick(): Int {
 fun Root(act: FragmentActivity) {
     val ctx = LocalContext.current
     val tick = rememberResumeTick()
-    val hasAll = remember(tick) { Environment.isExternalStorageManager() }
+    val hasAll = remember(tick) { Nav.permOverride ?: Environment.isExternalStorageManager() }
     if (!hasAll) {
         Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center) {
             Icon(Icons.Default.FolderOpen, null, Modifier.size(72.dp), tint = MaterialTheme.colorScheme.primary)

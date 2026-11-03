@@ -4,12 +4,13 @@ val ks = Properties().apply { val f = rootProject.file("keystore/keystore.proper
 android {
   namespace = "br.geracaoai.arquivos"
   compileSdk = 35
-  defaultConfig { applicationId = "br.geracaoai.arquivos"; minSdk = 30; targetSdk = 35; versionCode = 8; versionName = "1.7.0" }
+  defaultConfig { applicationId = "br.geracaoai.arquivos"; minSdk = 30; targetSdk = 35; versionCode = 9; versionName = "1.7.1" }
   signingConfigs { create("release") { if (ks.isNotEmpty()) { storeFile = rootProject.file(ks["storeFile"] as String); storePassword = ks["storePassword"] as String; keyAlias = ks["keyAlias"] as String; keyPassword = ks["keyPassword"] as String } } }
   buildTypes { release { isMinifyEnabled = true; isShrinkResources = true; proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"); signingConfig = signingConfigs.getByName("release") } }
   compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
   kotlinOptions { jvmTarget = "17" }
   buildFeatures { compose = true; aidl = false; buildConfig = true }
+  testOptions { unitTests.isIncludeAndroidResources = true }
   lint { checkReleaseBuilds = false; abortOnError = false }
 }
 dependencies {
@@ -30,4 +31,7 @@ dependencies {
   implementation("dev.rikka.shizuku:api:13.1.5")
   implementation("dev.rikka.shizuku:provider:13.1.5")
   testImplementation("junit:junit:4.13.2")
+  testImplementation("org.robolectric:robolectric:4.14.1")
+  testImplementation("androidx.compose.ui:ui-test-junit4")
+  debugImplementation("androidx.compose.ui:ui-test-manifest")
 }

@@ -290,15 +290,17 @@ fun DriveCard(go: (Scr) -> Unit) {
 
 
 /** Início + abas de pastas num pager: página 0 = Início, 1..N = abas (cada uma com sua pasta e rolagem). */
-@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class, androidx.compose.animation.ExperimentalSharedTransitionApi::class)
 @Composable
 fun HomePager(pager: androidx.compose.foundation.pager.PagerState, go: (Scr) -> Unit, openTab: (String) -> Unit, home: () -> Unit) {
     val ctx = LocalContext.current
     BackHandlerCompat(pager.currentPage > 0) { home() }
+    // Sem shared elements dentro do pager: Início e abas ficam compostos ao mesmo tempo e chaves iguais ("dir:…") conflitavam.
+    CompositionLocalProvider(LocalSTS provides null, LocalAVS provides null) {
     androidx.compose.foundation.pager.HorizontalPager(pager, Modifier.fillMaxSize(), beyondViewportPageCount = 1, key = { it }) { p ->
         if (p == 0) HomeScreen(go, openTab) else { val i = p - 1; val dir = Nav.tabs.getOrNull(i)
             if (dir != null) AnimatedContent(dir, transitionSpec = { val fwd = targetState.startsWith(initialState + "/")
                 (fadeIn(tween(220)) + scaleIn(tween(240), initialScale = if (fwd) 0.96f else 1.03f)) togetherWith (fadeOut(tween(150)) + scaleOut(tween(200), targetScale = if (fwd) 1.03f else 0.96f)) }, label = "tab$i") { d ->
                 BrowserScreen(d, onNavigate = { Nav.set(ctx, Tabs.update(Nav.tabs, i, it)) }, go = go, back = home, active = pager.currentPage == p) } }
-    }
+    } }
 }
