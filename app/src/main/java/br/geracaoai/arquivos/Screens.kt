@@ -41,13 +41,16 @@ fun loadRecent(ctx: Context): List<File> { val lim = System.currentTimeMillis() 
     return volumes(ctx).flatMap { v -> walk(v.root, false) { it.lastModified() > lim } }.sortedByDescending { it.lastModified() }.take(300) }
 
 @Composable
-fun HomeScreen(go: (Scr) -> Unit, resume: (() -> Unit)? = null) {
+fun HomeScreen(go: (Scr) -> Unit, openTab: (String) -> Unit = {}) {
     val ctx = LocalContext.current
     val vols = remember { volumes(ctx) }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { Text("Arquivos", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.Bold) }
-        (Nav.saved?.lastOrNull() as? Scr.Browse)?.let { last -> if (resume != null) item {
-            AssistChip(resume, { Text("Voltar para ${File(last.dir).name.ifEmpty { "Armazenamento" }}  ·  deslize ←", maxLines = 1) }, leadingIcon = { Icon(Icons.Default.History, null) }) } }
+        if (Nav.tabs.isNotEmpty()) item {
+            Column { Text("Abas recentes (${Nav.tabs.size}/8) · deslize ← para voltar", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                androidx.compose.foundation.lazy.LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp), contentPadding = PaddingValues(top = 4.dp)) {
+                    items(Nav.tabs.toList(), key = { it }) { t -> InputChip(false, { openTab(t) }, { Text(File(t).name.ifEmpty { "Armazenamento" }, maxLines = 1) }, leadingIcon = { Icon(Icons.Default.Folder, null, Modifier.size(18.dp)) },
+                        trailingIcon = { Icon(Icons.Default.Close, "Fechar aba", Modifier.size(16.dp).clickable { Nav.tabs.remove(t); Nav.save(ctx) }) }) } } } }
         items(vols) { v -> val (used, total) = remember(v) { stat(v.root) }
             Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(Brush.linearGradient(listOf(Color(0xFF1E3A66), Color(0xFF2B1E4F))))
                 .clickable { go(Scr.Browse(v.root.path)) }.padding(20.dp)) {
@@ -90,7 +93,7 @@ fun BrowserScreen(dir: String, onNavigate: (String) -> Unit, go: (Scr) -> Unit, 
     LaunchedEffect(Unit) { Prefs.load(ctx) }
     val d = File(dir)
     var refresh by remember { mutableIntStateOf(0) }
-    var files by remember { mutableStateOf<List<File>?>(null) }
+    var files by remember { mutableStateOf<List<File>?>(Nav.listCache[dir]) }
     var query by remember { mutableStateOf("") }; var searching by remember { mutableStateOf(false) }
     val sel = remember(dir) { mutableStateListOf<File>() }
     var sortMenu by remember { mutableStateOf(false) }; var newFolder by remember { mutableStateOf(false) }; var pasting by remember { mutableStateOf(false) }
@@ -100,7 +103,7 @@ fun BrowserScreen(dir: String, onNavigate: (String) -> Unit, go: (Scr) -> Unit, 
     LaunchedEffect(dir, refresh, Prefs.showHidden, Prefs.sort, query) {
         files = withContext(Dispatchers.IO) {
             if (query.length >= 2) walk(d, Prefs.showHidden) { it.name.contains(query, true) }.let { sortFiles(it, Prefs.sort) }.take(1000)
-            else sortFiles(d.listFiles().orEmpty().filter { Prefs.showHidden || !it.name.startsWith(".") }, Prefs.sort)
+            else sortFiles(d.listFiles().orEmpty().filter { Prefs.showHidden || !it.name.startsWith(".") }, Prefs.sort).also { Nav.listCache[dir] = it }
         }
     }
     val sp = Nav.scroll[dir]

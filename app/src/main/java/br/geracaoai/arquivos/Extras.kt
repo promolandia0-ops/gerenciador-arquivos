@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -35,45 +36,95 @@ object Similar {
     }
 }
 
+/** Regras puras de "arquivos inúteis" (testáveis). Caminhos relativos ao armazenamento (ex.: "Android/media/..."). */
+object JunkRules {
+    const val ICON_MAX_BYTES = 40 * 1024L; const val ICON_MAX_PX = 256
+    private val IMG = setOf("png", "webp", "gif", "jpg", "jpeg", "ico", "bmp")
+    private val STATUS = setOf(".statuses", "statuses", "status", "whatsapp status", ".stories", "stories")
+    private fun segs(rel: String) = rel.trim('/').lowercase().split('/')
+    /** Galeria do usuário: nunca mexer (exceto .thumbnails). */
+    fun isProtected(rel: String): Boolean { val s = segs(rel); return s.first() in setOf("dcim", "pictures", "movies") && ".thumbnails" !in s && ".thumbs" !in s }
+    fun isStatus(rel: String): Boolean { val s = segs(rel); val app = rel.lowercase().let { "whatsapp" in it || "telegram" in it || "instagram" in it || it.startsWith("android/media/") }
+        return app && s.dropLast(1).any { it in STATUS } && !s.last().equals(".nomedia") }
+    fun isIcon(rel: String, size: Long, w: Int = 0, h: Int = 0): Boolean { if (isProtected(rel) || isStatus(rel)) return false
+        val e = rel.substringAfterLast('.', "").lowercase(); if (e !in IMG || size <= 0 || size > ICON_MAX_BYTES) return false
+        return w <= 0 || h <= 0 || maxOf(w, h) <= ICON_MAX_PX }
+    fun isMediaCache(rel: String): Boolean { val s = segs(rel); if (isProtected(rel) || isStatus(rel)) return false
+        return (s.first() == "android" && s.getOrNull(1) == "media" && s.dropLast(1).drop(3).any { it == "cache" || it == ".cache" || it == "temp" || it == ".tmp" }) ||
+            s.dropLast(1).any { it == ".thumbnails" || it == ".thumbs" } }
+}
+
 object Junk {
-    data class Group(val label: String, val desc: String, val files: List<File>) { val size get() = files.sumOf { if (it.isFile) it.length() else it.walkTopDown().sumOf { f -> f.length() } } }
+    data class Group(val label: String, val desc: String, val files: List<File>, val media: Boolean = false) { val size by lazy { files.sumOf { if (it.isFile) it.length() else it.walkTopDown().sumOf { f -> f.length() } } } }
     fun scan(ctx: Context): List<Group> {
         val r = primaryRoot; val pm = ctx.packageManager
-        val all = walk(r, true) { true }
-        val thumbs = listOf("DCIM/.thumbnails", "Pictures/.thumbnails", "Movies/.thumbnails").map { File(r, it) }.filter { it.isDirectory }.flatMap { d -> d.listFiles().orEmpty().toList() }
+        val all = walk(r, true) { !it.path.contains("/.LixeiraGerenciador") }
+        fun rel(f: File) = f.path.removePrefix(r.path).trimStart('/')
+        val status = all.filter { JunkRules.isStatus(rel(it)) }
+        val icons = all.filter { f -> f.length() <= JunkRules.ICON_MAX_BYTES && JunkRules.isIcon(rel(f), f.length()) && run {
+            val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }; runCatching { BitmapFactory.decodeFile(f.path, o) }
+            JunkRules.isIcon(rel(f), f.length(), o.outWidth, o.outHeight) } }
+        val mcache = all.filter { JunkRules.isMediaCache(rel(it)) && it.name != ".nomedia" }
         val tmp = all.filter { it.ext in setOf("tmp", "temp", "bak") || it.name.endsWith("~") || it.name == "Thumbs.db" || it.name == ".DS_Store" }
         val logs = all.filter { it.ext == "log" || it.ext == "trace" }
         val apks = all.filter { it.ext == "apk" }.filter { f -> runCatching { val pi = pm.getPackageArchiveInfo(f.path, 0)!!; val inst = pm.getPackageInfo(pi.packageName, 0); inst.longVersionCode >= pi.longVersionCode }.getOrDefault(false) }
         val empty = r.walkBottomUp().filter { it.isDirectory && it != r && it.listFiles()?.isEmpty() == true && !it.path.contains("/Android/") && !it.path.contains(".LixeiraGerenciador") }.toList()
         val installed = pm.getInstalledApplications(0).map { it.packageName }.toSet()
         val orphans = File(r, "Android/media").listFiles().orEmpty().filter { it.isDirectory && it.name.contains('.') && it.name !in installed }
-        return listOf(Group("Miniaturas em cache", "O Android recria quando precisar", thumbs), Group("Arquivos temporários", ".tmp, .bak, Thumbs.db…", tmp),
+        return listOf(Group("Status", "Status/stories de WhatsApp, Telegram e outros salvos sem você pedir", status.sortedByDescending { it.length() }, true),
+            Group("Ícones e figurinhas", "Imagens minúsculas (até 40 KB / 256 px) fora da galeria", icons, true),
+            Group("Miniaturas e caches de mídia", ".thumbnails e caches em Android/media — o Android recria", mcache.sortedByDescending { it.length() }, true),
+            Group("Arquivos temporários", ".tmp, .bak, Thumbs.db…", tmp),
             Group("Logs", "Arquivos .log", logs), Group("APKs já instalados", "Instaladores de apps que você já tem", apks),
             Group("Pastas vazias", "Sem nenhum arquivo", empty), Group("Mídia de apps desinstalados", "Android/media órfão", orphans)).filter { it.files.isNotEmpty() }
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun JunkScreen(back: () -> Unit) {
     val ctx = LocalContext.current; val scope = rememberCoroutineScope()
     var groups by remember { mutableStateOf<List<Junk.Group>?>(null) }; var busy by remember { mutableStateOf(false) }
-    val chosen = remember { mutableStateListOf<String>() }; var ask by remember { mutableStateOf(false) }; var msg by remember { mutableStateOf<String?>(null) }
-    fun scan() { busy = true; scope.launch { groups = withContext(Dispatchers.IO) { Junk.scan(ctx) }; chosen.clear(); chosen.addAll(groups!!.filter { it.label != "APKs já instalados" }.map { it.label }); busy = false } }
-    val total = groups.orEmpty().filter { it.label in chosen }.sumOf { it.size }
-    Scaffold(contentWindowInsets = WindowInsets(0, 0, 0, 0), topBar = { Bar("Limpeza", groups?.let { "${fmtSize(it.sumOf { g -> g.size })} encontrados" }, back) },
-        bottomBar = { if (chosen.isNotEmpty() && groups != null) Button({ ask = true }, Modifier.fillMaxWidth().padding(12.dp).height(56.dp)) { Text("Limpar ${fmtSize(total)} (vai para a lixeira)") } }) { pad ->
+    val sel = remember { mutableStateMapOf<String, Boolean>() }; var open by remember { mutableStateOf<String?>(null) }
+    var ask by remember { mutableStateOf(false) }; var msg by remember { mutableStateOf<String?>(null) }
+    var job by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    fun scan() { busy = true; job = scope.launch { try { groups = withContext(Dispatchers.IO) { Junk.scan(ctx) }; sel.clear()
+        groups!!.filter { it.label in setOf("Status", "Miniaturas e caches de mídia", "Arquivos temporários") }.forEach { g -> g.files.forEach { sel[it.path] = true } } } finally { busy = false } } }
+    val chosen = groups.orEmpty().flatMap { it.files }.filter { sel[it.path] == true }
+    val total = chosen.sumOf { if (it.isFile) it.length() else it.walkTopDown().sumOf { f -> f.length() } }
+    Scaffold(contentWindowInsets = WindowInsets(0, 0, 0, 0), topBar = { Bar("Arquivos inúteis", groups?.let { "${fmtSize(it.sumOf { g -> g.size })} encontrados" }, back) {
+            if (busy) TextButton({ job?.cancel() }) { Text("Cancelar") } else if (groups != null) TextButton({ scan() }) { Text("Analisar de novo") } } },
+        bottomBar = { if (chosen.isNotEmpty()) Row(Modifier.fillMaxWidth().padding(12.dp)) {
+            OutlinedButton({ sel.clear() }, Modifier.height(56.dp)) { Text("Limpar seleção") }; Spacer(Modifier.width(8.dp))
+            Button({ ask = true }, Modifier.weight(1f).height(56.dp)) { Icon(Icons.Default.Delete, null); Spacer(Modifier.width(6.dp)); Text("Apagar ${chosen.size} · ${fmtSize(total)}") } } }) { pad ->
         Column(Modifier.padding(pad)) {
             msg?.let { Text(it, Modifier.padding(12.dp), color = MaterialTheme.colorScheme.secondary) }
-            when { busy -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+            when { busy -> Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) { CircularProgressIndicator(); Text("Analisando o armazenamento…", Modifier.padding(12.dp)) }
                 groups == null -> Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-                    EmptyState(Icons.Default.CleaningServices, "Limpeza segura", "Tudo que for limpo vai para a Lixeira primeiro e pode ser restaurado."); Button({ scan() }) { Text("Analisar") } }
+                    EmptyState(Icons.Default.CleaningServices, "Arquivos inúteis", "Status dos outros, ícones, figurinhas, miniaturas e caches. Fotos e vídeos da Câmera/DCIM/Pictures nunca entram. Tudo vai para a Lixeira do app e pode ser restaurado."); Button({ scan() }) { Text("Analisar") } }
                 groups!!.isEmpty() -> EmptyState(Icons.Default.Verified, "Nada para limpar")
-                else -> LazyColumn(contentPadding = PaddingValues(12.dp)) { items(groups!!) { g ->
-                    ListItem({ Text(g.label) }, supportingContent = { Text("${g.files.size} itens · ${fmtSize(g.size)} · ${g.desc}") },
-                        trailingContent = { Checkbox(g.label in chosen, { if (it) chosen.add(g.label) else chosen.remove(g.label) }) }) } } }
+                else -> LazyColumn(contentPadding = PaddingValues(12.dp)) { groups!!.forEach { g ->
+                    val n = g.files.count { sel[it.path] == true }
+                    item(key = "h" + g.label) { ElevatedCard(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                        ListItem({ Text(g.label) }, Modifier.clickable { open = if (open == g.label) null else g.label },
+                            supportingContent = { Text("${g.files.size} itens · ${fmtSize(g.size)}" + (if (n > 0) " · $n marcados" else "") + "\n${g.desc}") },
+                            leadingContent = { Icon(when (g.label) { "Status" -> Icons.Default.AutoAwesome; "Ícones e figurinhas" -> Icons.Default.EmojiEmotions; else -> Icons.Default.CleaningServices }, null, tint = MaterialTheme.colorScheme.primary) },
+                            trailingContent = { TriStateCheckbox(when (n) { 0 -> androidx.compose.ui.state.ToggleableState.Off; g.files.size -> androidx.compose.ui.state.ToggleableState.On; else -> androidx.compose.ui.state.ToggleableState.Indeterminate }, {
+                                val on = n < g.files.size; g.files.forEach { if (on) sel[it.path] = true else sel.remove(it.path) } }) }) } }
+                    if (open == g.label) {
+                        item(key = "a" + g.label) { Row { TextButton({ g.files.forEach { sel[it.path] = true } }) { Text("Marcar todos") }; TextButton({ g.files.forEach { sel.remove(it.path) } }) { Text("Desmarcar") } } }
+                        if (g.media) items(g.files.take(600).chunked(4), key = { "r" + it.first().path }) { row -> Row(Modifier.fillMaxWidth()) { row.forEach { f ->
+                            Box(Modifier.weight(1f)) { MediaCell(RItem(RCat.CACHE, f.path, f.length(), f.lastModified(), f.ext.ifEmpty { Carver.sniff(f) }), sel[f.path] == true,
+                                { if (sel[f.path] == true) sel.remove(f.path) else sel[f.path] = true }) { if (sel[f.path] == true) sel.remove(f.path) else sel[f.path] = true } } }
+                            repeat(4 - row.size) { Spacer(Modifier.weight(1f)) } } }
+                        else items(g.files.take(600), key = { "f" + it.path }) { f -> ListItem({ Text(f.name, maxLines = 1) }, supportingContent = { Text(f.parent?.removePrefix(primaryRoot.path).orEmpty() + " · " + fmtSize(if (f.isFile) f.length() else 0), maxLines = 1) },
+                            trailingContent = { Checkbox(sel[f.path] == true, { if (it) sel[f.path] = true else sel.remove(f.path) }) }) }
+                        if (g.files.size > 600) item(key = "m" + g.label) { Text("+${g.files.size - 600} itens (incluídos em Marcar todos)", Modifier.padding(8.dp), style = MaterialTheme.typography.labelSmall) }
+                    } } } }
         }
     }
-    if (ask) Confirm("Limpar?", "${fmtSize(total)} serão movidos para a Lixeira do app (restauráveis).", "Limpar", onDismiss = { ask = false }) {
-        val fs = groups.orEmpty().filter { it.label in chosen }.flatMap { it.files }
-        scope.launch { var n = 0; withContext(Dispatchers.IO) { fs.forEach { if (it.exists() && Trash.moveToTrash(ctx, it)) n++ } }; msg = "✓ $n itens movidos para a lixeira"; scan() } }
+    if (ask) Confirm("Apagar ${chosen.size} itens?", "${fmtSize(total)} serão movidos para a Lixeira do app (dá para restaurar em Ferramentas > Lixeira).", "Apagar", danger = true, onDismiss = { ask = false }) {
+        ask = false; val fs = chosen.toList()
+        scope.launch { var ok = 0; withContext(Dispatchers.IO) { fs.forEach { if (it.exists() && !JunkRules.isProtected(it.path.removePrefix(primaryRoot.path).trimStart('/')) && Trash.moveToTrash(ctx, it)) ok++ } }
+            msg = "✓ $ok itens movidos para a lixeira · ${fmtSize(total)}"; scan() } }
 }

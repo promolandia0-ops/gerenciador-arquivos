@@ -1,5 +1,6 @@
 package br.geracaoai.arquivos
 
+import kotlinx.coroutines.launch
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import java.io.File
@@ -43,9 +44,23 @@ val Light = lightColorScheme(primary = Color(0xFF2F5FA8), secondary = Color(0xFF
 object Nav { var progress by mutableFloatStateOf(0f)
     /** Posição de rolagem por pasta (índice, offset). */
     val scroll = HashMap<String, Pair<Int, Int>>()
-    /** Pilha salva ao pular de uma pasta para o Início (para voltar com um gesto). */
-    var saved by mutableStateOf<List<Scr>?>(null)
-    var swipeDx by mutableFloatStateOf(0f) }
+    /** Até 8 abas de pastas recentes (mais recente primeiro), persistidas. */
+    val tabs = mutableStateListOf<String>()
+    val listCache = HashMap<String, List<java.io.File>>()
+    var swipeDx by mutableFloatStateOf(0f)
+    fun load(ctx: android.content.Context) { if (tabs.isEmpty()) tabs.addAll(Tabs.decode(ctx.getSharedPreferences("prefs", 0).getString("tabs", null) ?: ctx.getSharedPreferences("prefs", 0).getString("lastDir", null)).filter { java.io.File(it).isDirectory }) }
+    fun save(ctx: android.content.Context) = ctx.getSharedPreferences("prefs", 0).edit().putString("tabs", Tabs.encode(tabs)).apply()
+    fun push(ctx: android.content.Context, dir: String) { val n = Tabs.push(tabs, dir); tabs.clear(); tabs.addAll(n); save(ctx) }
+}
+
+/** Lógica pura das abas (testável). */
+object Tabs {
+    const val MAX = 8
+    fun push(l: List<String>, dir: String, max: Int = MAX) = (listOf(dir) + l.filter { it != dir }).take(max)
+    fun next(l: List<String>, cur: String?): String? = if (l.isEmpty()) null else l[(l.indexOf(cur) + 1).mod(l.size)]
+    fun encode(l: List<String>) = l.joinToString("\n")
+    fun decode(s: String?) = s.orEmpty().split('\n').filter { it.isNotBlank() }.take(MAX)
+}
 @OptIn(ExperimentalSharedTransitionApi::class)
 val LocalSTS = staticCompositionLocalOf<SharedTransitionScope?> { null }
 val LocalAVS = compositionLocalOf<AnimatedVisibilityScope?> { null }
@@ -101,10 +116,11 @@ fun Root(act: FragmentActivity) {
     fun go(s: Scr) { stack.add(s) }
     fun tab(s: Scr) { stack.clear(); stack.add(s) }
     BackHandlerCompat(stack.size > 1) { stack.removeAt(stack.lastIndex) }
-    LaunchedEffect(Unit) { if (Nav.saved == null) ctx.getSharedPreferences("prefs", 0).getString("lastDir", null)?.takeIf { File(it).isDirectory }?.let { Nav.saved = listOf(Scr.Home, Scr.Browse(it)) } }
-    fun jumpHome() { Nav.saved = stack.toList(); (stack.last() as? Scr.Browse)?.let { ctx.getSharedPreferences("prefs", 0).edit().putString("lastDir", it.dir).apply() }
-        stack.clear(); stack.add(Scr.Home) }
-    fun restore() { val sv = Nav.saved ?: return; stack.clear(); stack.addAll(sv) }
+    remember { Nav.load(ctx); 0 }
+    fun jumpHome() { (stack.last() as? Scr.Browse)?.let { Nav.push(ctx, it.dir) }; stack.clear(); stack.add(Scr.Home) }
+    fun openTab(dir: String) { stack.clear(); stack.add(Scr.Home); stack.add(Scr.Browse(dir)) }
+    val swipeScope = rememberCoroutineScope()
+    fun settle() { val from = Nav.swipeDx; swipeScope.launch { androidx.compose.animation.core.animate(from, 0f, animationSpec = tween(180)) { v, _ -> Nav.swipeDx = v } } }
     val density = androidx.compose.ui.platform.LocalDensity.current; val trigger = with(density) { 96.dp.toPx() }
     val tabs = listOf(Triple(Scr.Home, "Início", Icons.Default.Home), Triple(Scr.Dups, "Duplicados", Icons.Default.VideoLibrary),
         Triple(Scr.Apps, "Apps", Icons.Default.Apps), Triple(Scr.Tools, "Ferramentas", Icons.Default.Build))
@@ -116,14 +132,16 @@ fun Root(act: FragmentActivity) {
         }
     }) { pad ->
         if (settings) SettingsSheet { settings = false }
-        Box(Modifier.padding(pad).pointerInput(cur is Scr.Browse, cur == Scr.Home && Nav.saved != null) {
-            val inBrowse = cur is Scr.Browse; val atHome = cur == Scr.Home && Nav.saved != null
-            if (!inBrowse && !atHome) return@pointerInput
+        val curDir = (cur as? Scr.Browse)?.dir; val isHome = cur == Scr.Home
+        Box(Modifier.padding(pad).pointerInput(curDir, isHome) {
+            if (curDir == null && !isHome) return@pointerInput
             var acc = 0f
-            detectHorizontalDragGestures(onDragStart = { acc = 0f }, onDragCancel = { Nav.swipeDx = 0f },
-                onDragEnd = { if (inBrowse && acc > trigger) jumpHome() else if (atHome && acc < -trigger) restore(); Nav.swipeDx = 0f }) { _, dx ->
-                acc += dx; Nav.swipeDx = if (inBrowse) acc.coerceAtLeast(0f) else acc.coerceAtMost(0f) }
-        }.graphicsLayer { translationX = Nav.swipeDx * 0.35f
+            detectHorizontalDragGestures(onDragStart = { acc = 0f }, onDragCancel = { settle() },
+                onDragEnd = { settle()
+                    if (curDir != null && acc > trigger) jumpHome()
+                    else if (acc < -trigger) { val t = if (isHome) Nav.tabs.firstOrNull() else Tabs.next(Nav.tabs, curDir); if (t != null && t != curDir) openTab(t) } }) { ch, dx ->
+                ch.consume(); acc += dx; Nav.swipeDx = acc.coerceIn(-size.width * 0.5f, size.width * 0.5f) }
+        }.graphicsLayer { translationX = Nav.swipeDx * 0.3f
              val p = Nav.progress; scaleX = 1f - 0.08f * p; scaleY = 1f - 0.08f * p; alpha = 1f - 0.3f * p
             shape = RoundedCornerShape((32 * p).dp); clip = p > 0f }) {
          SharedTransitionLayout {
@@ -134,7 +152,11 @@ fun Root(act: FragmentActivity) {
                   (slideOutHorizontally(tween(320, easing = ease)) { -it / 5 } + fadeOut(tween(200)))
               fun bwd() = (slideInHorizontally(tween(320, easing = ease)) { -it / 5 } + fadeIn(tween(260))) togetherWith
                   (slideOutHorizontally(tween(300, easing = ease)) { it / 3 } + fadeOut(tween(220)) + scaleOut(tween(300), targetScale = 0.96f))
+              val quick = tween<androidx.compose.ui.unit.IntOffset>(240, easing = ease)
               when {
+                  a is Scr.Browse && b is Scr.Browse && !b.dir.startsWith(a.dir + "/") && !a.dir.startsWith(b.dir + "/") -> slideInHorizontally(quick) { it / 2 } togetherWith slideOutHorizontally(quick) { -it / 2 }
+                  a == Scr.Home && b is Scr.Browse && Nav.swipeDx != 0f -> slideInHorizontally(quick) { it / 2 } togetherWith slideOutHorizontally(quick) { -it / 2 }
+                  a is Scr.Browse && b == Scr.Home && Nav.swipeDx != 0f -> slideInHorizontally(quick) { -it / 2 } togetherWith slideOutHorizontally(quick) { it / 2 }
                   a is Scr.Browse && b is Scr.Browse -> if (b.dir.startsWith(a.dir + "/")) fwd() else bwd()
                   a == Scr.Home && b is Scr.Browse -> fwd()
                   a is Scr.Browse && b == Scr.Home -> bwd()
@@ -143,7 +165,7 @@ fun Root(act: FragmentActivity) {
           }, contentKey = { if (it is Scr.Browse) "b" + it.dir else it.toString() }, label = "nav") { cur ->
            CompositionLocalProvider(LocalSTS provides this@SharedTransitionLayout, LocalAVS provides this@AnimatedContent) {
             when (cur) {
-                Scr.Home -> HomeScreen(::go, if (Nav.saved != null) ({ restore() }) else null)
+                Scr.Home -> HomeScreen(::go, { openTab(it) })
                 is Scr.Browse -> BrowserScreen(cur.dir, onNavigate = { stack[stack.lastIndex] = Scr.Browse(it) }, go = ::go, back = { stack.removeAt(stack.lastIndex) })
                 is Scr.Category -> FileListScreen(cur.cat.label, { loadCategory(ctx, cur.cat) }, ::go) { stack.removeAt(stack.lastIndex) }
                 Scr.Recent -> FileListScreen("Recentes", { loadRecent(ctx) }, ::go) { stack.removeAt(stack.lastIndex) }
@@ -214,7 +236,7 @@ fun ToolsScreen(go: (Scr) -> Unit) {
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScrollCompat()) {
         Text("Ferramentas", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.padding(bottom = 8.dp))
         ToolTile(Icons.Default.ManageSearch, "Busca intensa / Recuperar", "Lixeiras, caches, miniaturas, blobs, extensão trocada, órfãos") { go(Scr.Recover) }
-        ToolTile(Icons.Default.CleaningServices, "Limpeza", "Cache, temporários, APKs instalados, pastas vazias (vai para a lixeira)") { go(Scr.Junk) }
+        ToolTile(Icons.Default.CleaningServices, "Arquivos inúteis", "Status dos outros, ícones, miniaturas, caches, temporários (vai para a lixeira)") { go(Scr.Junk) }
         ToolTile(Icons.Default.VisibilityOff, "Fotos e vídeos ocultos", "Mídias escondidas em pastas com ponto e .nomedia") { go(Scr.Hidden) }
         ToolTile(Icons.Default.Android, "Android/data e obb", "Acesso via SAF ou Shizuku (Android 11 a 15)") { go(Scr.Data) }
         ToolTile(Icons.Default.Lock, "Cofre", "Esconda arquivos com criptografia AES-256 e PIN/biometria") { go(Scr.Vault) }
